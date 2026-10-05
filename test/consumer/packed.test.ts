@@ -62,10 +62,14 @@ it('verifies one exact MIT-licensed tarball with real auth, CLI, types and brows
         const managers = process.env.CONTACT_PACKAGE_MANAGER
             ? [process.env.CONTACT_PACKAGE_MANAGER]
             : ['bun', 'npm', 'pnpm']
-        const version = process.env.CONTACT_BETTER_AUTH_VERSION ?? '1.7.7'
-        for (const manager of managers) {
+        const versions = process.env.CONTACT_BETTER_AUTH_VERSION
+            ? [process.env.CONTACT_BETTER_AUTH_VERSION]
+            : ['1.7.0', '^1.7.0']
+        for (const { manager, version } of managers.flatMap((packageManager) =>
+            versions.map((authVersion) => ({ manager: packageManager, version: authVersion })),
+        )) {
             assert(['bun', 'npm', 'pnpm'].includes(manager))
-            const consumer = join(directory, manager)
+            const consumer = join(directory, `${manager}-${encodeURIComponent(version)}`)
             await mkdir(consumer)
             await copyFile(tarball, join(consumer, archiveName))
             await writeFile(
@@ -81,7 +85,7 @@ it('verifies one exact MIT-licensed tarball with real auth, CLI, types and brows
                         zod: '^4.5.4',
                         valibot: '^1.5.0',
                     },
-                    devDependencies: { typescript: '^7.0.2', '@types/node': '^26.6.3', auth: '1.7.7' },
+                    devDependencies: { typescript: '^7.0.2', '@types/node': '^26.6.3', auth: version },
                 }),
             )
             // Bun caches relative file tarballs across projects. Keep concurrent package checks isolated.
@@ -94,6 +98,16 @@ it('verifies one exact MIT-licensed tarball with real auth, CLI, types and brows
                 name: packedManifest.name,
                 version: packedManifest.version,
             })
+            const installedAuth = JSON.parse(
+                await readFile(join(consumer, 'node_modules/better-auth/package.json'), 'utf8'),
+            ) as { version: string }
+            const installedCore = JSON.parse(
+                await readFile(join(consumer, 'node_modules/@better-auth/core/package.json'), 'utf8'),
+            ) as { version: string }
+            expect(installedAuth.version).toBe(installedCore.version)
+            expect(version === '1.7.0' ? installedAuth.version : installedCore.version).toBe(
+                version === '1.7.0' ? '1.7.0' : installedAuth.version,
+            )
             for (const entry of entries.filter((name) => name.startsWith('package/dist/') && !name.endsWith('/'))) {
                 expect(await readFile(join(installed, entry.slice('package/'.length)), 'utf8')).toBe(
                     run('tar', ['-xOf', tarball, entry], directory),
@@ -131,22 +145,28 @@ import * as z from 'zod'
 import * as v from 'valibot'
 const database = new DatabaseSync(':memory:')
 export const auth = betterAuth({ database, baseURL: 'http://localhost:3000', secret: 'packed-contact-secret-more-than-thirty-two-characters', plugins: [contact({models: {
-  feedback: { fields: {score: {type:'number', validator:{input:z.string().transform(Number)}}, label:{type:'string',validator:{input:v.pipe(v.string(),v.trim())}}, priority:{type:'number',input:false,defaultValue:0}}, states: {received:{default:true},reviewed:{}}, access:{create:()=>true,list:()=>({where:[]}),transition:()=>true} },
+  feedback: { fields: {score: {type:'number', validator:{input:z.string().transform(Number)}}, label:{type:'string',validator:{input:v.pipe(v.string(),v.trim())}}, priority:{type:'number',input:false,defaultValue:0}}, states: {received:{default:true},reviewed:{}}, list:{filters:['state'],orderBy:['createdAt'],search:['label'],count:true}, idempotency:{replay:()=>true,anonymousScope:()=> 'server-verified-test-visitor'}, access:{create:()=>true,list:()=>({where:[]}),transition:()=>true} },
 }})], logger:{disabled:true} })
 await (await getMigrations(auth.options)).runMigrations()
-const first=await auth.api.createContact({body:{model:'feedback',data:{score:'4',label:' hi '}}})
+const body={model:'feedback' as const,data:{score:'4',label:' hi '},idempotencyKey:crypto.randomUUID()}
+const first=await auth.api.createContact({body})
+assert.equal((await auth.api.createContact({body})).id,first.id)
 assert.equal(first.record?.score,4); assert.equal(first.record?.label,'hi')
 assert.equal(database.prepare('SELECT score FROM contact_feedback').get()?.score,4)
 const next=await auth.api.transitionContact({body:{model:'feedback',id:first.id,revision:first.revision,state:'reviewed'}})
 assert.equal(next.record?.state,'reviewed')
+const page=await auth.api.listContacts({body:{model:'feedback',count:true,orderBy:{field:'createdAt',direction:'desc'},filters:[{field:'state',value:'reviewed'}],search:{field:'label',term:'hi'}}})
+assert.equal(page.count,1)
 const response=await auth.handler(new Request('http://localhost:3000/api/auth/contact/list',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:'feedback'})}))
 assert.equal(response.status,200); assert.equal((await response.json()).records.length,1)
 assert.equal((await auth.handler(new Request('http://localhost:3000/api/auth/contact/maintain',{method:'POST',headers:{'content-type':'application/json'},body:'{}'}))).status,404)
 if(false){
   // @ts-expect-error transformed field takes schema input
-  await auth.api.createContact({body:{model:'feedback',data:{score:4,label:'hi'}}})
+  await auth.api.createContact({body:{...body,data:{score:4,label:'hi'}}})
   // @ts-expect-error managed field cannot be supplied
-  await auth.api.createContact({body:{model:'feedback',data:{score:'4',label:'hi',priority:1}}})
+  await auth.api.createContact({body:{...body,data:{score:'4',label:'hi',priority:1}}})
+  // @ts-expect-error keyed models require a submission key
+  await auth.api.createContact({body:{model:'feedback',data:{score:'4',label:'hi'}}})
 }
 database.close()
 `,
@@ -157,7 +177,7 @@ database.close()
 import {contactClient} from 'better-contact/client'
 import type {auth} from './consumer.ts'
 export const client=createAuthClient({plugins:[contactClient<typeof auth>()]})
-void client.contact.create({model:'feedback',data:{score:'4',label:'hi'}}).then(({data})=>{
+void client.contact.create({model:'feedback',data:{score:'4',label:'hi'},idempotencyKey:crypto.randomUUID()}).then(({data})=>{
   if(data?.record){ const n:number=data.record.score; void n
     // @ts-expect-error output is a number
     const bad:string=data.record.score; void bad
@@ -175,7 +195,7 @@ void client.maintainContact({})
                 join(consumer, 'auth.ts'),
                 `import {betterAuth} from 'better-auth'
 import {contact} from 'better-contact'
-export const auth=betterAuth({plugins:[contact({models:{report:{fields:{targetId:{type:'string'},rating:{type:'number',required:false}},states:{received:{default:true}}}}})]})
+export const auth=betterAuth({plugins:[contact({models:{report:{schema:{modelName:'moderation_reports',fields:{userId:{fieldName:'author_id',references:{model:'user',field:'id',onDelete:'set null'}}}},idempotency:{replay:()=>true},fields:{targetId:{type:'string'},rating:{type:'number',required:false}},states:{received:{default:true}}}}})]})
 `,
             )
             run(
@@ -196,7 +216,11 @@ export const auth=betterAuth({plugins:[contact({models:{report:{fields:{targetId
                 consumer,
             )
             const schema = await readFile(join(consumer, 'generated-schema.ts'), 'utf8')
-            expect(schema).toMatch(/contact_report/u)
+            expect(schema).toMatch(/moderation_reports/u)
+            expect(schema).toMatch(/author_id/u)
+            expect(schema).toMatch(/set null/u)
+            expect(schema).toMatch(/contact__receipt/u)
+            expect(schema).toMatch(/token:[^\n]*unique/u)
             expect(schema).toMatch(/targetId:\s*text\(["']target_id["']\)\.notNull\(\)/u)
             expect(schema).toMatch(/rating:\s*(?:integer|real|numeric)\(["']rating["']\)/u)
             expect(schema).not.toMatch(/rating:[^\n]*notNull/u)

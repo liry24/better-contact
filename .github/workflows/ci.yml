@@ -35,12 +35,14 @@ jobs:
         permissions: { contents: read }
         strategy:
             fail-fast: false
-            matrix: { os: [ubuntu-latest, windows-latest] }
+            matrix: { os: [ubuntu-latest, windows-latest], version: ['1.7.0', '^1.7.0'] }
         runs-on: ${{ matrix.os }}
         steps:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
               with: { persist-credentials: false }
             - uses: ./.github/actions/setup
+            - run: bun add --dev --exact "better-auth@${{ matrix.version }}" "@better-auth/core@${{ matrix.version }}" "auth@${{ matrix.version }}"
+            - run: vp run typecheck
             - run: vp run test:unit
             - run: vp run test:integration
     consumer:
@@ -51,9 +53,7 @@ jobs:
             matrix:
                 os: [ubuntu-latest, windows-latest]
                 manager: [bun, npm, pnpm]
-                version: ['1.7.7']
-                include:
-                    - { os: ubuntu-latest, manager: bun, version: '>=1.7.7 <1.8.0' }
+                version: ['1.7.0', '^1.7.0']
         runs-on: ${{ matrix.os }}
         env:
             CONTACT_PACKAGE_MANAGER: ${{ matrix.manager }}
