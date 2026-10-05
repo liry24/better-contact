@@ -9,6 +9,7 @@ it('uses native table/column mappings and preserves configured user deletion beh
         const app = await setup({
             models: {
                 report: {
+                    idempotency: false as const,
                     schema: {
                         modelName: 'moderation_reports',
                         fields: {
@@ -59,7 +60,9 @@ it('rejects aliases that collide or change authoritative base field semantics', 
         { fields: { userId: { references: { model: 'session', field: 'id' } } } },
         { fields: { state: { fieldName: 'text' } } },
     ])
-        expect(() => contact({ models: { report: { ...base, schema } } } as any)).toThrow(/contact/iu)
+        expect(() => contact({ models: { report: { idempotency: false as const, ...base, schema } } } as any)).toThrow(
+            /contact/iu,
+        )
     expect(() =>
         contact({
             models: {
@@ -78,6 +81,7 @@ it('rejects aliases that collide or change authoritative base field semantics', 
             contact({
                 models: {
                     report: {
+                        idempotency: false as const,
                         ...base,
                         fields: {
                             ...base.fields,

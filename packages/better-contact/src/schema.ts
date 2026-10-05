@@ -19,29 +19,34 @@ export const baseFields = {
     createdAt: { type: 'date', input: false },
     updatedAt: { type: 'date', input: false },
 } satisfies ContactFields
+export const submissionFields = {
+    submissionToken: { type: 'string', required: false, input: false, returned: false, unique: true },
+    submissionFingerprint: { type: 'string', required: false, input: false, returned: false },
+} satisfies ContactFields
 const reserved = new Set(
     ['id', ...Object.keys(baseFields), '__proto__', 'constructor', 'prototype'].map((key) => key.toLowerCase()),
 )
 export const tableName = (model: string) => `contact_${model}`
-// The double underscore cannot collide with a configured model (which starts with a letter).
-export const receiptTable = 'contact__receipt'
 const normalized = (name: string) => name.replace(/([a-z0-9])([A-Z])/gu, '$1_$2').toLowerCase()
 export function modelFields(definition: ContactModels[string]): ContactFields {
-    return Object.fromEntries(
-        Object.entries(baseFields).map(([key, value]) => [
-            key,
-            {
-                ...value,
-                // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Keys come from the closed baseFields object above.
-                ...definition.schema?.fields?.[key as keyof typeof baseFields],
-            },
-        ]),
-    )
+    return {
+        ...(definition.idempotency !== false ? submissionFields : {}),
+        ...Object.fromEntries(
+            Object.entries(baseFields).map(([key, value]) => [
+                key,
+                {
+                    ...value,
+                    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Keys come from the closed baseFields object above.
+                    ...definition.schema?.fields?.[key as keyof typeof baseFields],
+                },
+            ]),
+        ),
+    }
 }
 
 export function buildSchema(models: ContactModels) {
     const schema: NonNullable<BetterAuthPlugin['schema']> = {}
-    const tables = new Set(['user', 'session', 'account', 'verification', normalized(receiptTable)])
+    const tables = new Set(['user', 'session', 'account', 'verification'])
     if (!Object.keys(models).length) throw new Error('Contact requires at least one model')
     for (const [model, definition] of Object.entries(models)) {
         if (!/^[a-z][a-z0-9_]{0,39}$/u.test(model) || reserved.has(model))
@@ -81,7 +86,7 @@ export function buildSchema(models: ContactModels) {
         if (new Set(coreColumns.map(normalized)).size !== coreColumns.length)
             throw new Error('Colliding contact base field mappings')
         const physical = new Set([...reserved, ...coreColumns.map((column) => column.toLowerCase())])
-        const logical = new Set(reserved)
+        const logical = new Set([...reserved, ...Object.keys(core).map((key) => key.toLowerCase())])
         const generatedColumns = new Set(coreColumns.map(normalized))
         for (const [key, field] of Object.entries(definition.fields)) {
             const column = field.fieldName ?? key
@@ -107,24 +112,14 @@ export function buildSchema(models: ContactModels) {
                 throw new Error(`Required managed contact field needs a default: ${key}`)
         }
         schema[tableName(model)] = { modelName, fields: { ...core, ...definition.fields } }
-        if (definition.idempotency) {
-            const retention = definition.idempotency.retentionSeconds ?? 604_800
-            if (!Number.isSafeInteger(retention) || retention < 60 || retention > 2_592_000)
-                throw new Error('Contact receipt retention must be between 60 seconds and thirty days')
-            if (typeof definition.idempotency.replay !== 'function')
-                throw new Error('Contact idempotency requires an explicit replay policy')
-            schema[receiptTable] = {
-                modelName: receiptTable,
-                fields: {
-                    token: { type: 'string', unique: true, input: false },
-                    fingerprint: { type: 'string', input: false },
-                    resourceId: { type: 'string', input: false },
-                    expiresAt: { type: 'date', input: false, index: true },
-                    payload: { type: 'string', input: false },
-                    hooks: { type: 'string', input: false },
-                },
-            }
-        }
+        if (
+            definition.idempotency !== undefined &&
+            definition.idempotency !== false &&
+            (!object(definition.idempotency) ||
+                Object.keys(definition.idempotency).some((key) => !['replay', 'anonymousScope'].includes(key)) ||
+                Object.values(definition.idempotency).some((value) => typeof value !== 'function'))
+        )
+            throw new Error('Unsupported contact idempotency configuration')
     }
     return schema
 }
@@ -197,7 +192,7 @@ export async function prepare(
     mode: 'create' | 'update',
     managed: boolean,
     maxBytes: number,
-    defaults?: { keys: string[]; values?: Record<string, unknown> },
+    defaults?: { keys: string[]; replay?: boolean },
 ) {
     if (!object(input) || Reflect.ownKeys(input).length !== Object.keys(input).length)
         fail('FIELDS', 'Expected contact fields')
@@ -209,6 +204,8 @@ export async function prepare(
     for (const [key, field] of Object.entries(fields)) {
         if (mode === 'update' && !Object.hasOwn(input, key) && !field.onUpdate) continue
         let value = input[key]
+        // A replay only validates submitted values: no factories or omitted-value validators run again.
+        if (defaults?.replay && value === undefined) continue
         // Native defaults/onUpdate are materialized once so policies see the exact proposed values.
         // Passing them explicitly prevents the adapter from running their factories a second time.
         let generated = false
@@ -217,13 +214,9 @@ export async function prepare(
             mode === 'create' &&
             field.defaultValue !== undefined
         ) {
-            value =
-                defaults?.values && Object.hasOwn(defaults.values, key)
-                    ? defaults.values[key]
-                    : typeof field.defaultValue === 'function'
-                      ? field.defaultValue()
-                      : field.defaultValue
             defaults?.keys.push(key)
+            if (defaults?.replay) continue
+            value = typeof field.defaultValue === 'function' ? field.defaultValue() : field.defaultValue
             generated = true
         } else if (value === undefined && mode === 'update' && field.onUpdate) {
             value = field.onUpdate()

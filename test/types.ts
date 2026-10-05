@@ -12,6 +12,7 @@ const auth = betterAuth({
         contact({
             models: {
                 feedback: {
+                    idempotency: false,
                     states: { received: { default: true }, reviewed: {} },
                     fields: {
                         score: { type: 'number', validator: { input: z.string().transform(Number) } },
@@ -34,7 +35,6 @@ const auth = betterAuth({
                 inquiry: {
                     states: { new: { default: true }, answered: {} },
                     fields: { question: { type: 'string' } },
-                    idempotency: { replay: () => true },
                 },
             },
         }),
@@ -57,7 +57,7 @@ async function assertions() {
         void status
     }
     const result = await auth.api.createContact({ body: { model: 'feedback', data: { score: '3', label: 'hi' } } })
-    if (result.model === 'feedback' && result.record) {
+    if (result.model === 'feedback' && !result.replayed && result.record) {
         const n: number = result.record.score
         const state: 'received' | 'reviewed' = result.record.state
         const output: number | null | undefined = result.record.result
@@ -80,6 +80,19 @@ async function assertions() {
         // @ts-expect-error Clients cannot choose an authoritative actor scope.
         scope: 'someone-else',
     })
+    const receipt = await client.contact.create({
+        model: 'inquiry',
+        data: { question: 'hello' },
+        idempotencyKey: crypto.randomUUID(),
+    })
+    if (receipt.data?.replayed) {
+        const accepted: true = receipt.data.accepted
+        void accepted
+        // @ts-expect-error Replays contain no row contents.
+        void receipt.data.record
+    }
+    // @ts-expect-error Disabled models reject unused keys.
+    await client.contact.create({ model: 'feedback', data: { score: '3', label: 'hi' }, idempotencyKey: 'unused' })
     await client.contact.transition({ model: 'inquiry', id: 'x', revision: 0, state: 'answered' })
     // @ts-expect-error Zod input must be string.
     await auth.api.createContact({ body: { model: 'feedback', data: { score: 3, label: 'hi' } } })

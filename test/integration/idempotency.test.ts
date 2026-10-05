@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { expect, it, vi } from 'vite-plus/test'
 import * as z from 'zod'
 
+import { contact } from '../../packages/better-contact/src/index'
 import { setup } from '../utils'
 
 const key = (): string => crypto.randomUUID()
@@ -23,10 +24,8 @@ const base = {
     },
     states: { received: { default: true }, done: {} },
     access: { create: () => true },
-    idempotency: { replay: () => true },
 }
-
-it('does not reserve rejected creations and replays accepted output failures without repeating state hooks', async () => {
+it('protects by default without reserving rejected submissions or repeating hooks after output failures', async () => {
     let reject = true
     const afterEnter = vi.fn<() => void>()
     const app = await setup({
@@ -37,79 +36,84 @@ it('does not reserve rejected creations and replays accepted output failures wit
                 states: { received: { default: true, hooks: { afterEnter } } },
                 hooks: {
                     beforeCreate: () => {
-                        if (reject) throw new Error('application veto')
+                        if (reject) throw new Error('veto')
                     },
                 },
             },
         },
     })
     try {
-        const user = await app.user()
-        const body = { model: 'report' as const, data: { text: 'accepted' }, idempotencyKey: key() }
-        await expect(app.auth.api.createContact({ headers: user.headers, body })).rejects.toThrow('application veto')
-        expect(app.database.prepare('SELECT count(*) AS total FROM contact__receipt').get()?.total).toBe(0)
+        const user = await app.user(),
+            body = { model: 'report' as const, data: { text: 'accepted' }, idempotencyKey: key() }
+        await expect(app.auth.api.createContact({ headers: user.headers, body })).rejects.toThrow('veto')
+        expect(app.database.prepare('SELECT count(*) AS n FROM contact_report').get()?.n).toBe(0)
+        expect(
+            app.database.prepare("SELECT name FROM sqlite_master WHERE name='contact__receipt'").get(),
+        ).toBeUndefined()
         reject = false
         const first = await app.auth.api.createContact({ headers: user.headers, body })
-        const retry = await app.auth.api.createContact({ headers: user.headers, body })
-        expect(first).toMatchObject({ record: null, output: 'failed', replayed: false })
-        expect(retry).toMatchObject({ id: first.id, record: null, output: 'failed', replayed: true })
+        expect(first).toMatchObject({ accepted: true, record: null, output: 'failed', replayed: false })
+        expect(await app.auth.api.createContact({ headers: user.headers, body })).toEqual({
+            model: 'report',
+            id: first.id,
+            accepted: true,
+            replayed: true,
+        })
         expect(afterEnter).toHaveBeenCalledTimes(1)
     } finally {
         app.close()
     }
 })
-
-it('replays normalized creation results without regenerating defaults or exposing later management changes', async () => {
+it('replays identity only, rechecks policies and never regenerates defaults or reapplies adapter transforms', async () => {
     let allowed = true,
         replayAllowed = true
-    const defaultValue = vi.fn<() => string>(() => crypto.randomUUID())
-    const transform = vi.fn<(value: unknown) => string>((value: unknown) => `${String(value)}!`)
-    const notification = vi.fn<() => void>()
-    const hidden = { type: 'string' as const, defaultValue: 'visible-at-creation', returned: true }
+    const generated = vi.fn<() => string>(() => key()),
+        schemaDefault = vi.fn<() => string>(() => key()),
+        notification = vi.fn<() => void>()
+    const transform = vi.fn<(value: unknown) => string>((value) => `${String(value)}!`)
     const app = await setup({
         models: {
             report: {
                 ...base,
                 fields: {
                     ...base.fields,
-                    generated: { type: 'string', input: false, defaultValue },
-                    secret: { type: 'string', returned: false, defaultValue: 'never returned' },
-                    changeable: hidden,
+                    generated: { type: 'string', input: false, defaultValue: generated },
+                    schemaDefault: { type: 'string', validator: { input: z.string().default(schemaDefault) } },
+                    secret: { type: 'string', returned: false, defaultValue: 'hidden' },
                     encoded: {
                         type: 'string',
                         transform: { input: transform, output: (value: unknown) => String(value).slice(0, -1) },
                     },
                 },
-                idempotency: { replay: () => replayAllowed },
                 access: { create: ({ session }) => allowed && !!session },
+                idempotency: { replay: () => replayAllowed },
                 hooks: { afterCreate: notification },
             },
         },
     })
     try {
-        const user = await app.user()
-        const body = { model: 'report' as const, data: { text: '  hello  ', encoded: 'once' }, idempotencyKey: key() }
+        const user = await app.user(),
+            body = { model: 'report' as const, data: { text: ' hello ', encoded: 'once' }, idempotencyKey: key() }
         const first = await app.auth.api.createContact({ headers: user.headers, body })
-        expect(first.replayed).toBe(false)
+        if (first.replayed) throw new Error('Expected new submission')
+        expect(first.record).not.toHaveProperty('submissionToken')
+        expect(first.record).not.toHaveProperty('submissionFingerprint')
         await app.auth.api.maintainContact({
             body: {
                 operation: 'update',
                 model: 'report',
                 id: first.id,
                 revision: 0,
-                data: { text: 'staff-only later change' },
+                data: { text: 'staff-only change' },
             },
         })
-        const replay = await app.auth.api.createContact({
-            headers: user.headers,
-            body: { ...body, data: { encoded: 'once', text: 'hello' } },
-        })
-        expect(replay).toMatchObject({ ...first, changed: false, replayed: true })
-        expect(replay.record?.createdAt).toBeInstanceOf(Date)
-        expect(defaultValue).toHaveBeenCalledTimes(1)
-        expect(transform).toHaveBeenCalledTimes(1)
-        expect(notification).toHaveBeenCalledTimes(1)
-        expect(replay.record).not.toHaveProperty('secret')
+        expect(
+            await app.auth.api.createContact({
+                headers: user.headers,
+                body: { ...body, data: { encoded: 'once', text: 'hello' } },
+            }),
+        ).toEqual({ model: 'report', id: first.id, accepted: true, replayed: true })
+        for (const fn of [generated, schemaDefault, transform, notification]) expect(fn).toHaveBeenCalledTimes(1)
         expect((await app.request('read', { model: 'report', id: first.id }, user.headers)).status).toBe(404)
         expect((await app.request('list', { model: 'report' }, user.headers)).status).toBe(403)
         expect(
@@ -120,32 +124,22 @@ it('replays normalized creation results without regenerating defaults or exposin
         replayAllowed = true
         allowed = false
         expect((await app.request('create', body, user.headers)).status).toBe(403)
-        allowed = true
-        hidden.returned = false
-        expect((await app.auth.api.createContact({ headers: user.headers, body })).record).not.toHaveProperty(
-            'changeable',
-        )
-        expect(app.database.prepare('SELECT count(*) AS total FROM contact_report').get()?.total).toBe(1)
     } finally {
         app.close()
     }
 })
-
-it('binds keys to model and authoritative actors, requiring an explicit trusted anonymous identity', async () => {
+it('binds keys to model and server-resolved actor, requiring a verified anonymous scope only at use', async () => {
     const proofA = key(),
-        proofB = key()
-    const proofs = new Map([
-        [proofA, 'visitor-a'],
-        [proofB, 'visitor-b'],
-    ])
+        proofB = key(),
+        proofs = new Map([
+            [proofA, 'a'],
+            [proofB, 'b'],
+        ])
     const app = await setup({
         models: {
             feedback: {
                 ...base,
-                idempotency: {
-                    replay: () => true,
-                    anonymousScope: ({ headers }) => proofs.get(headers.get('x-verified-test-proof') ?? '') ?? null,
-                },
+                idempotency: { anonymousScope: ({ headers }) => proofs.get(headers.get('x-test-proof') ?? '') ?? null },
             },
             report: base,
             other: base,
@@ -153,105 +147,110 @@ it('binds keys to model and authoritative actors, requiring an explicit trusted 
     })
     try {
         const user = await app.user(),
-            other = await app.user()
-        const idempotencyKey = key()
-        const body = { model: 'report' as const, data: { text: 'same' }, idempotencyKey }
-        const first = await app.auth.api.createContact({ headers: user.headers, body })
-        const second = await app.auth.api.createContact({ headers: other.headers, body })
-        const anotherModel = await app.auth.api.createContact({
-            headers: user.headers,
-            body: { ...body, model: 'other' },
-        })
-        expect(new Set([first.id, second.id, anotherModel.id]).size).toBe(3)
+            other = await app.user(),
+            body = { model: 'report' as const, data: { text: 'same' }, idempotencyKey: key() }
+        const first = await app.auth.api.createContact({ headers: user.headers, body }),
+            second = await app.auth.api.createContact({ headers: other.headers, body }),
+            another = await app.auth.api.createContact({ headers: user.headers, body: { ...body, model: 'other' } })
+        expect(new Set([first.id, second.id, another.id]).size).toBe(3)
         expect((await app.request('create', body)).status).toBe(403)
-        expect((await app.request('create', { ...body, model: 'feedback' })).status).toBe(403)
-        const headersA = new Headers({ 'x-verified-test-proof': proofA }),
-            headersB = new Headers({ 'x-verified-test-proof': proofB })
-        const anonymousBody = { ...body, model: 'feedback' as const }
-        const anonymous = await app.auth.api.createContact({ headers: headersA, body: anonymousBody })
-        expect((await app.auth.api.createContact({ headers: headersA, body: anonymousBody })).id).toBe(anonymous.id)
-        expect((await app.auth.api.createContact({ headers: headersB, body: anonymousBody })).id).not.toBe(anonymous.id)
+        const a = new Headers({ 'x-test-proof': proofA }),
+            b = new Headers({ 'x-test-proof': proofB }),
+            anonymousBody = { ...body, model: 'feedback' as const }
+        const anonymous = await app.auth.api.createContact({ headers: a, body: anonymousBody })
+        expect((await app.auth.api.createContact({ headers: a, body: anonymousBody })).id).toBe(anonymous.id)
+        expect((await app.auth.api.createContact({ headers: b, body: anonymousBody })).id).not.toBe(anonymous.id)
         for (const bad of [
             { ...body, scope: user.id },
             { ...body, userId: user.id },
             { ...body, idempotencyKey: 'short' },
             { model: 'report', data: { text: 'same' } },
+            { ...body, data: { text: 'same', submissionToken: 'spoof' } },
+            { ...body, data: { text: 'same', submissionFingerprint: 'spoof' } },
         ])
             expect((await app.request('create', bad, user.headers)).status).toBe(400)
         proofs.delete(proofA)
-        expect((await app.request('create', anonymousBody, headersA)).status).toBe(403)
+        expect((await app.request('create', anonymousBody, a)).status).toBe(403)
     } finally {
         app.close()
     }
 })
-
-it('commits row and receipt together, rolls back a receipt failure, and handles a lost commit acknowledgement', async () => {
-    const hook = vi.fn<() => void>()
-    const app = await setup({ models: { report: { ...base, hooks: { afterCreate: hook } } } })
+it('uses one insert without transactions and recovers only positively verified lost acknowledgements', async () => {
+    const hook = vi.fn<() => void>(),
+        app = await setup({ models: { report: { ...base, hooks: { afterCreate: hook } } } })
     try {
-        const user = await app.user()
-        const body = { model: 'report' as const, data: { text: 'atomic' }, idempotencyKey: key() }
+        const user = await app.user(),
+            adapter = (await app.auth.$context).adapter,
+            body = { model: 'report' as const, data: { text: 'atomic' }, idempotencyKey: key() }
+        const transaction = vi.spyOn(adapter, 'transaction').mockRejectedValue(new Error('unavailable'))
         app.database.exec(
-            "CREATE TRIGGER fail_receipt BEFORE INSERT ON contact__receipt BEGIN SELECT RAISE(ABORT,'receipt failure'); END",
+            "CREATE TRIGGER fail_contact BEFORE INSERT ON contact_report BEGIN SELECT RAISE(ABORT,'insert failure'); END",
         )
-        await expect(app.auth.api.createContact({ headers: user.headers, body })).rejects.toThrow(/receipt failure/u)
-        expect(app.database.prepare('SELECT count(*) AS total FROM contact_report').get()?.total).toBe(0)
-        expect(app.database.prepare('SELECT count(*) AS total FROM contact__receipt').get()?.total).toBe(0)
-        expect(hook).not.toHaveBeenCalled()
-        app.database.exec('DROP TRIGGER fail_receipt')
-        const adapter = (await app.auth.$context).adapter
-        const transaction = adapter.transaction.bind(adapter)
-        adapter.transaction = async (callback) => {
-            await transaction(callback)
-            throw new Error('commit acknowledgement lost')
-        }
+        await expect(app.auth.api.createContact({ headers: user.headers, body })).rejects.toThrow(/insert failure/u)
+        expect(app.database.prepare('SELECT count(*) AS n FROM contact_report').get()?.n).toBe(0)
+        app.database.exec('DROP TRIGGER fail_contact')
+        const create = adapter.create.bind(adapter)
+        const insert = vi.spyOn(adapter, 'create').mockImplementation(async (args) => {
+            await create(args)
+            throw new Error('ack lost')
+        })
         const accepted = await app.auth.api.createContact({ headers: user.headers, body })
-        expect(accepted).toMatchObject({ replayed: true, hooks: { status: 'unknown' }, record: { text: 'atomic' } })
-        adapter.transaction = transaction
-        const retry = await app.auth.api.createContact({ headers: user.headers, body })
-        expect(retry.id).toBe(accepted.id)
+        expect(accepted).toEqual({ model: 'report', id: expect.any(String), accepted: true, replayed: true })
+        insert.mockRestore()
+        expect((await app.auth.api.createContact({ headers: user.headers, body })).id).toBe(accepted.id)
         expect(hook).not.toHaveBeenCalled()
-        expect(app.database.prepare('SELECT count(*) AS total FROM contact_report').get()?.total).toBe(1)
-    } finally {
-        app.close()
-    }
-})
-
-it('never repeats after hooks after notification or outcome-persistence failure and refuses unsupported transactions', async () => {
-    const hook = vi.fn<() => void>(() => {
-        throw new Error('notification offline')
-    })
-    const app = await setup({ models: { report: { ...base, hooks: { afterCreate: hook } } } })
-    try {
-        const user = await app.user()
-        const body = { model: 'report' as const, data: { text: 'accepted' }, idempotencyKey: key() }
-        const accepted = await app.auth.api.createContact({ headers: user.headers, body })
-        expect(accepted.hooks).toEqual({ status: 'failed', failed: ['afterCreate'] })
-        expect((await app.auth.api.createContact({ headers: user.headers, body })).hooks).toEqual(accepted.hooks)
-        expect(hook).toHaveBeenCalledTimes(1)
-        app.database.exec(
-            "CREATE TRIGGER fail_outcome BEFORE UPDATE ON contact__receipt BEGIN SELECT RAISE(ABORT,'outcome failure'); END",
-        )
-        const next = { ...body, idempotencyKey: key() }
-        expect((await app.auth.api.createContact({ headers: user.headers, body: next })).hooks.status).toBe('failed')
-        expect((await app.auth.api.createContact({ headers: user.headers, body: next })).hooks.status).toBe('unknown')
-        expect(hook).toHaveBeenCalledTimes(2)
-        const adapter = (await app.auth.$context).adapter
-        adapter.options!.adapterConfig.transaction = false
+        expect(transaction).not.toHaveBeenCalled()
+        const original = new Error('uncertain insert'),
+            find = adapter.findOne.bind(adapter)
+        let attempted = false
+        const read = vi.spyOn(adapter, 'findOne').mockImplementation(async (args) => {
+            if (attempted && args.model === 'contact_report') throw new Error('lookup unavailable')
+            return find(args)
+        })
+        const failed = vi.spyOn(adapter, 'create').mockImplementation(async () => {
+            attempted = true
+            throw original
+        })
         await expect(
             app.auth.api.createContact({ headers: user.headers, body: { ...body, idempotencyKey: key() } }),
-        ).rejects.toMatchObject({ body: { code: 'CONTACT_TRANSACTION_REQUIRED' } })
-        expect(app.database.prepare('SELECT count(*) AS total FROM contact_report').get()?.total).toBe(2)
+        ).rejects.toBe(original)
+        failed.mockRestore()
+        read.mockRestore()
     } finally {
         app.close()
     }
 })
-
-it('handles independent database connection races, deletion tombstones and bounded key reuse', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'contact-race-'))
-    const hook = vi.fn<() => void>()
-    let arrivals = 0
-    let release!: () => void
+it('does not treat unrelated uniqueness errors as success or repeat failed notification hooks', async () => {
+    const hook = vi.fn<() => void>(() => {
+            throw new Error('offline')
+        }),
+        app = await setup({
+            models: {
+                report: { ...base, fields: { text: { type: 'string', unique: true } }, hooks: { afterCreate: hook } },
+            },
+        })
+    try {
+        const user = await app.user(),
+            body = { model: 'report' as const, data: { text: 'accepted' }, idempotencyKey: key() }
+        const accepted = await app.auth.api.createContact({ headers: user.headers, body })
+        if (accepted.replayed) throw new Error('Expected new submission')
+        expect(accepted.hooks).toEqual({ status: 'failed', failed: ['afterCreate'] })
+        const replay = await app.auth.api.createContact({ headers: user.headers, body })
+        expect(replay).not.toHaveProperty('hooks')
+        expect(replay).not.toHaveProperty('record')
+        await expect(
+            app.auth.api.createContact({ headers: user.headers, body: { ...body, idempotencyKey: key() } }),
+        ).rejects.toThrow(/UNIQUE constraint/iu)
+        expect(hook).toHaveBeenCalledTimes(1)
+    } finally {
+        app.close()
+    }
+})
+it('handles independent connection races and physical deletion ends protection', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'contact-race-')),
+        hook = vi.fn<() => void>()
+    let arrivals = 0,
+        release!: () => void
     const gate = new Promise<void>((resolve) => {
         release = resolve
     })
@@ -259,7 +258,6 @@ it('handles independent database connection races, deletion tombstones and bound
         models: {
             report: {
                 ...base,
-                idempotency: { replay: () => true, retentionSeconds: 60 },
                 hooks: {
                     beforeCreate: async () => {
                         if (++arrivals === 2) release()
@@ -270,27 +268,23 @@ it('handles independent database connection races, deletion tombstones and bound
             },
         },
     }
-    const first = await setup(options, join(directory, 'race.sqlite'))
-    const second = await setup(options, join(directory, 'race.sqlite'))
+    const first = await setup(options, join(directory, 'race.sqlite')),
+        second = await setup(options, join(directory, 'race.sqlite'))
     try {
-        const user = await first.user()
-        const body = { model: 'report' as const, data: { text: 'race' }, idempotencyKey: key() }
+        const user = await first.user(),
+            body = { model: 'report' as const, data: { text: 'race' }, idempotencyKey: key() }
         const raced = await Promise.allSettled([
             first.auth.api.createContact({ headers: user.headers, body }),
             second.auth.api.createContact({ headers: user.headers, body }),
         ])
         expect(raced.filter((result) => result.status === 'fulfilled').length).toBeGreaterThanOrEqual(1)
         const accepted = await first.auth.api.createContact({ headers: user.headers, body })
-        const retried = await second.auth.api.createContact({ headers: user.headers, body })
-        expect(retried.id).toBe(accepted.id)
+        expect((await second.auth.api.createContact({ headers: user.headers, body })).id).toBe(accepted.id)
         expect(hook).toHaveBeenCalledTimes(1)
-        expect(first.database.prepare('SELECT count(*) AS total FROM contact_report').get()?.total).toBe(1)
+        expect(first.database.prepare('SELECT count(*) AS n FROM contact_report').get()?.n).toBe(1)
         await first.auth.api.maintainContact({
             body: { operation: 'delete', model: 'report', id: accepted.id, revision: 0 },
         })
-        expect((await second.request('create', body, user.headers)).status).toBe(404)
-        expect(first.database.prepare('SELECT count(*) AS total FROM contact_report').get()?.total).toBe(0)
-        first.database.prepare('UPDATE contact__receipt SET expiresAt=?').run(new Date(0).toISOString())
         const reused = await second.auth.api.createContact({ headers: user.headers, body })
         expect(reused.id).not.toBe(accepted.id)
         expect(reused.replayed).toBe(false)
@@ -301,3 +295,65 @@ it('handles independent database connection races, deletion tombstones and bound
         await rm(directory, { recursive: true, force: true })
     }
 }, 20_000)
+it('emits no protection columns or indexes when disabled and rejects unused keys', async () => {
+    const definition = { ...base, idempotency: false as const }
+    expect(contact({ models: { feedback: definition } }).schema.contact_feedback?.fields).not.toHaveProperty(
+        'submissionToken',
+    )
+    const app = await setup({ models: { feedback: definition } })
+    try {
+        const body = { model: 'feedback' as const, data: { text: 'same' } },
+            first = await app.auth.api.createContact({ body }),
+            second = await app.auth.api.createContact({ body })
+        expect(first.id).not.toBe(second.id)
+        expect(
+            JSON.stringify(
+                app.database.prepare("SELECT sql FROM sqlite_master WHERE tbl_name='contact_feedback'").all(),
+            ),
+        ).not.toMatch(/submission|fingerprint|receipt/iu)
+        expect((await app.request('create', { ...body, idempotencyKey: key() })).status).toBe(400)
+    } finally {
+        app.close()
+    }
+})
+it('uses versioned canonical content and fails closed on changed normalization', async () => {
+    let suffix = ''
+    const app = await setup({
+        models: {
+            report: {
+                ...base,
+                fields: {
+                    text: {
+                        type: 'string',
+                        validator: { input: z.string().transform((value) => value.trim() + suffix) },
+                    },
+                    date: { type: 'date' },
+                    details: { type: 'json' },
+                },
+            },
+        },
+    })
+    try {
+        const user = await app.user(),
+            body = {
+                model: 'report' as const,
+                data: { text: ' hello ', date: new Date('2026-01-01'), details: { a: 1, b: ['x', false] } },
+                idempotencyKey: key(),
+            }
+        const first = await app.auth.api.createContact({ headers: user.headers, body }),
+            reordered = { ...body, data: { ...body.data, details: { b: ['x', false], a: 1 } } }
+        expect((await app.auth.api.createContact({ headers: user.headers, body: reordered })).id).toBe(first.id)
+        expect((await app.request('create', reordered, user.headers)).status).toBe(200)
+        const row = app.database.prepare('SELECT submissionToken,submissionFingerprint FROM contact_report').get()
+        expect(row?.submissionToken).toMatch(/^v1:[0-9a-f]{64}$/u)
+        expect(row?.submissionFingerprint).toMatch(/^v1:[0-9a-f]{64}$/u)
+        suffix = 'changed'
+        expect((await app.request('create', body, user.headers)).status).toBe(409)
+        suffix = ''
+        app.database.prepare('UPDATE contact_report SET submissionFingerprint=?').run('v0:unknown')
+        expect((await app.request('create', body, user.headers)).status).toBe(409)
+        expect(app.database.prepare('SELECT count(*) AS n FROM contact_report').get()?.n).toBe(1)
+    } finally {
+        app.close()
+    }
+})

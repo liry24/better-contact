@@ -6,6 +6,7 @@ it('intersects allowlisted filters/search/count with permission scopes and order
     const app = await setup({
         models: {
             report: {
+                idempotency: false as const,
                 fields: {
                     text: { type: 'string' },
                     category: { type: 'string' },
@@ -114,6 +115,7 @@ it('keeps query capabilities opt-in and rejects unsafe configured fields', async
     const app = await setup({
         models: {
             feedback: {
+                idempotency: false as const,
                 fields: { text: { type: 'string' } },
                 states: { received: { default: true } },
                 access: { list: () => ({ where: [] }) },

@@ -22,6 +22,7 @@ it('persists real native columns and async validators, defaults, mappings and tr
     const app = await setup({
         models: {
             feedback: {
+                idempotency: false as const,
                 states,
                 fields: {
                     text: {
@@ -31,6 +32,7 @@ it('persists real native columns and async validators, defaults, mappings and tr
                         validator: { input: v.pipe(v.string(), v.trim(), v.minLength(2)) },
                     },
                     rating: {
+                        idempotency: false as const,
                         type: 'number',
                         validator: { input: { '~standard': { version: 1, vendor: 'test', validate: validation } } },
                     },
@@ -122,8 +124,14 @@ it('uses authoritative sessions and per-operation policies for HTTP and direct A
         !!session && staff.has(session.user.id)
     const app = await setup({
         models: {
-            feedback: { states, fields: { text: { type: 'string' } }, access: { create: allow } },
+            feedback: {
+                idempotency: false as const,
+                states,
+                fields: { text: { type: 'string' } },
+                access: { create: allow },
+            },
             report: {
+                idempotency: false as const,
                 states,
                 fields: { targetId: { type: 'string' }, reason: { type: 'string' } },
                 access: {
@@ -199,6 +207,7 @@ it('orders custom state hooks, rejects before persistence, skips no-ops and repo
     const app = await setup({
         models: {
             inquiry: {
+                idempotency: false as const,
                 fields: { text: { type: 'string' } },
                 states: {
                     received: {
@@ -285,6 +294,7 @@ it('CAS makes concurrent transitions have exactly one winner and one after hook'
     const app = await setup({
         models: {
             feedback: {
+                idempotency: false as const,
                 states,
                 fields: { text: { type: 'string' } },
                 access: { create: allow, transition: allow },
@@ -317,6 +327,7 @@ it('scopes before pagination, isolates owners and rejects unsupported scopes and
         limits: { maxBulk: 2 },
         models: {
             rating: {
+                idempotency: false as const,
                 states,
                 fields: { score: { type: 'number', validator: { input: z.number().int().min(1).max(5) } } },
                 access: {
@@ -385,6 +396,7 @@ it('guards size/rate, validates defaults/async output and preserves accepted sub
         limits: { maxBytes: 100, createsPerMinute: 5 },
         models: {
             feedback: {
+                idempotency: false as const,
                 states,
                 fields: {
                     text: {
@@ -423,6 +435,7 @@ it('guards size/rate, validates defaults/async output and preserves accepted sub
 it('bulk returns honest ordered partial results and management never bypasses validation', async () => {
     const models = {
         feedback: {
+            idempotency: false as const,
             states,
             fields: { text: { type: 'string' } },
             access: { create: allow, update: allow, delete: allow, transition: allow },

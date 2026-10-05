@@ -16,6 +16,7 @@ export const auth = betterAuth({
     contact({
       models: {
         feedback: {
+          idempotency: false, // Anonymous example without a verified visitor identity.
           fields: {
             message: { type: 'string', validator: { input: z.string().trim().min(1).max(2000) } },
             priority: { type: 'number', input: false, defaultValue: 0 },
@@ -99,7 +100,7 @@ Pages default to ID ascending. Other orders use ID in the same direction to brea
 
 ## Safe creation retries
 
-Enable receipts on a model with `idempotency: { replay: ({ session, record }) => !!session && record?.userId === session.user.id }`. That model then requires `idempotencyKey` on every create call. Generate a random key once per submission and reuse it after a lost response:
+Retry protection is **on by default**. Every protected model requires an `idempotencyKey` on creation. Generate a random key once per submission and retain it until the result is known:
 
 ```ts
 const submission = {
@@ -107,18 +108,31 @@ const submission = {
   idempotencyKey: crypto.randomUUID(),
   data: { targetId: 'public-resource', reason: 'incorrect information' },
 }
-await client.contact.create(submission)
+const result = await client.contact.create(submission)
 ```
 
-Keys accept 16–128 ASCII letters, digits, hyphens or underscores. They are scoped to the model and server-resolved user ID. Anonymous keyed creation requires `idempotency.anonymousScope({ model, headers })` to return an application-verified, stable identity (for example, a verified signed visitor cookie); returning null denies creation. Never derive it from an unverified client-supplied identity. No body parameter can select the actor scope.
+Set `idempotency: false` on a model to opt out. Its generated schema has no protection columns or indexes, and supplying a key is rejected. Each accepted call then creates a new record. The anonymous introductory example uses this option. Changing configuration does not modify an existing database: generate, review and apply an ordinary migration to remove obsolete columns or tables.
 
-The native contact row and an internal `contact__receipt` row commit in one **real adapter transaction**. The receipt's unique hashed token resolves races; its encoded snapshot preserves the original accepted response without replacing native model columns. Adapters must explicitly advertise an enabled transaction implementation. A silently sequential `transaction()` fallback is rejected before writing. **The current native D1 adapter is unsupported for keyed creation.** There is no custom persistence callback or public prepare/commit API. Wrapping `createContact` with a separate idempotency write cannot make them atomic.
+Keys accept 16–128 ASCII letters, digits, hyphens or underscores. A versioned SHA-256 token binds each key to the model and server-resolved user ID. Authenticated callers need no scope configuration. Anonymous callers of protected models must have a stable, application-verified identity:
 
-Replays validate the submitted fields, recheck `access.create`, run the guard, and require the explicit `idempotency.replay` policy against the current record. They return the original creation snapshot with `replayed: true` and `changed: false`, never later management changes. Currently hidden/removed fields are stripped. The replay policy must authorize returning historical submitted values (`changes` contains the original normalized data); deny old receipts if application privacy/presentation rules change. Serializers are not reapplied to already-presented snapshots. This grants no ordinary read/list permission. Deletion or revoked replay permission makes the receipt unavailable without creating a replacement. Same key with different normalized submitted content returns `CONTACT_IDEMPOTENCY_CONFLICT`; new keys can intentionally submit identical content. Input validators must normalize deterministically. Native generated defaults are preserved for replay and excluded from the content fingerprint; adapter transforms are not reapplied to the snapshot.
+```ts
+idempotency: {
+  anonymousScope: async ({ headers }) => {
+    const visitor = await verifySignedVisitorCookie(headers) // Your application verifier.
+    return visitor?.id ?? null
+  },
+}
+```
 
-Receipts expire after seven days (`retentionSeconds`, 60 seconds through thirty days). After expiry the key may create a new record. Expired rows are replaced lazily on key reuse; schedule application database maintenance to purge expired `contact__receipt` rows if needed. Receipt snapshots contain submission data and need the same storage access controls and retention review as contact rows.
+Missing or invalid anonymous scope rejects creation before writing. The plugin never derives identity from an IP address, unverified cookie or submitted user ID. Keep the resolver's identity namespace stable across deployments. `idempotency.replay` is an optional additional policy receiving the current record; deny it when an application's rules require revoking receipt access.
 
-After hooks execute only for the request that knows it committed. Replays never repeat them. A crash or ambiguous commit acknowledgement can leave `hooks.status: 'unknown'`; it still identifies an accepted submission, not permission to retry notification delivery. Receipt outcome-update failures also leave this status. Use a separate durable application delivery mechanism when notification delivery must survive crashes.
+Two private native columns, `submissionToken` (unique) and `submissionFingerprint`, are saved in the same INSERT as the contact fields. There is no receipt table, snapshot, transaction requirement or D1-specific wrapper. Protected rows retain these values for their lifetime; there is no TTL or automatic cleanup. Physical deletion, including a configured cascade, ends protection: the same key can then create a new row. Columns are nullable for pre-existing records, which gain no retrospective retry protection.
+
+The first accepted write returns its normal creation result plus `accepted: true, replayed: false`. A retry returns only `{ model, id, accepted: true, replayed: true }`. Narrow on `replayed` before accessing creation data. Receipts grant no read/list access and expose neither original content nor later staff edits. Replays recheck `access.create`, the guard and any replay policy. The create policy receives normalized submitted values on replay; omitted defaults are not regenerated or reconstructed from mutable rows. Keep creation policies compatible with that distinction, or deny replay explicitly.
+
+The content fingerprint uses deterministic normalization of explicitly supplied values, with sorted object keys and distinct representations for dates and arrays. Native defaults, omitted-value validator defaults and adapter encodings are excluded. Submitted input validators run again; they must be deterministic. Same key with different normalized content returns `CONTACT_IDEMPOTENCY_CONFLICT`. Fingerprints have an explicit format version; unknown versions or changed normalization fail closed instead of permitting a second insert. New keys may intentionally submit identical content.
+
+An INSERT error proves nothing by itself. Only a successful lookup of the same actor-bound token and matching content confirms an already accepted submission; otherwise the original database error remains. This covers unique-key races and lost acknowledgements without depending on a database error string. After hooks run only for the request that knows it inserted the row, and never on replay. A lost acknowledgement or crash can therefore skip delivery. Receipts make no claim about hook outcomes; use an application-owned durable delivery mechanism if delivery must survive crashes.
 
 ## Native storage mapping
 
@@ -159,7 +173,7 @@ Creation runs model `beforeCreate`, initial-state `beforeEnter`, persistence, mo
 
 Mutations require the last read revision and use the adapter's atomic guarded operations. A concurrent write returns `CONTACT_CONFLICT`; reload before retrying. Bulk actions are sequential, bounded (50 by default, maximum 100), and return an ordered result for every item. They are not a transaction and may partially succeed. Duplicate items are not silently deduplicated.
 
-Accepted mutations return `{ model, id, revision, record, changed, hooks, output }`; creation also returns `replayed`. After-hook failures return `hooks: { status: 'failed', failed: [...] }`; other after hooks still run. `onHookError` can capture details. A failed output validator returns `output: 'failed'` and `record: null`, retaining the saved identity/revision. Neither failure should trigger resubmission. Hooks are best-effort within the request, not a durable delivery queue. Models without idempotency receipts can still have ambiguous database outcomes.
+Accepted mutations return `{ model, id, revision, record, changed, hooks, output }`; the first creation also returns `accepted: true, replayed: false`. After-hook failures return `hooks: { status: 'failed', failed: [...] }`; other after hooks still run. `onHookError` can capture details. A failed output validator returns `output: 'failed'` and `record: null`, retaining the saved identity/revision. Neither failure should trigger resubmission. Hooks are best-effort within the request, not a durable delivery queue. Models with protection disabled can still have ambiguous database outcomes.
 
 `auth.api.maintainContact` is an explicit **server-only** maintenance API for update, transition and delete. It bypasses access policies and permits `input: false` fields, while preserving field/state validation, revision checks and hooks. It has no HTTP path or client action. Do not wrap it in an unprotected route. Ordinary `auth.api` operations never bypass policies.
 
@@ -167,7 +181,7 @@ Accepted mutations return `{ model, id, revision, record, changed, hooks, output
 
 The shared service limits input and validated fields to 16 KiB, page size to 100, and creation attempts to 60 per minute per model per plugin instance. Configure `limits.maxBytes`, `maxPage`, `maxBulk`, `createsPerMinute` as needed. The process-local creation limit bounds load across HTTP and direct calls; use `guard` for a shared atomic, application-specific abuse limiter across instances. Configure ingress/body limits and Better Auth's HTTP rate limiting as well. Avoid performing expensive external work in field validators.
 
-Reply threads, internal messages, attachments, ticketing and SLA behavior are intentionally outside this package. Stable model/record IDs and persistence hooks allow future extensions. The verified database target is SQLite; other adapters need their own integration and atomic-operation tests.
+Reply threads, internal messages, attachments, ticketing and SLA behavior are intentionally outside this package. Stable model/record IDs and persistence hooks allow future extensions. Tests cover real SQLite and local Cloudflare D1 through native Better Auth and Drizzle adapters. Production D1 service behavior and other adapters need their own integration checks.
 
 ## Development
 

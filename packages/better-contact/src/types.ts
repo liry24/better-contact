@@ -48,14 +48,16 @@ export type ContactModel = {
         search?: readonly string[]
         count?: boolean
     }
-    idempotency?: {
-        /** Explicit permission to replay a creation receipt; receives the current record. */
-        replay: Policy
-        /** Resolve a verified anonymous identity, never a raw client-selected scope. */
-        anonymousScope?: (context: Pick<AccessContext, 'model' | 'headers'>) => string | null | Promise<string | null>
-        /** Defaults to seven days; at most thirty days. */
-        retentionSeconds?: number
-    }
+    idempotency?:
+        | false
+        | {
+              /** Optional additional restriction on receipt-only replay; receives the current record. */
+              replay?: Policy
+              /** Resolve a verified anonymous identity, never a raw client-selected scope. */
+              anonymousScope?: (
+                  context: Pick<AccessContext, 'model' | 'headers'>,
+              ) => string | null | Promise<string | null>
+          }
     states: Record<
         string,
         { default?: boolean; hooks?: { beforeEnter?: Hook; afterEnter?: Hook; beforeLeave?: Hook; afterLeave?: Hook } }
@@ -114,16 +116,20 @@ export type ContactRecord<D extends ContactModel> = {
         | OutputValue<D['fields'][K]>
         | (D['fields'][K] extends { required: false } ? null | undefined : never)
 }
-export type HookResult = { status: 'ok' | 'failed' | 'unknown'; failed: string[] }
+export type HookResult = { status: 'ok' | 'failed'; failed: string[] }
 export type DeleteResult = { deleted: true; hooks: HookResult }
 export type CreateBody<M extends ContactModels> = {
     [K in keyof M & string]: { model: K; data: ContactInput<M[K]['fields']> } & (M[K] extends {
-        idempotency: object
+        idempotency: false
     }
-        ? { idempotencyKey: string }
-        : { idempotencyKey?: never })
+        ? { idempotencyKey?: never }
+        : { idempotencyKey: string })
 }[keyof M & string]
-export type CreateResult<M extends ContactModels> = MutationResult<M> & { replayed: boolean }
+export type CreateResult<M extends ContactModels> = {
+    [K in keyof M & string]:
+        | (MutationResult<Pick<M, K>> & { accepted: true; replayed: false })
+        | (M[K] extends { idempotency: false } ? never : { model: K; id: string; accepted: true; replayed: true })
+}[keyof M & string]
 export type TargetBody<M extends ContactModels> = { model: keyof M & string; id: string }
 export type UpdateBody<M extends ContactModels> = {
     [K in keyof M & string]: { model: K; id: string; revision: number; data: Partial<ContactInput<M[K]['fields']>> }

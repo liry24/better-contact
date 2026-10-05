@@ -10,6 +10,9 @@ it('rejects unsafe names, ambiguous defaults, reserved fields and unsupported ma
         { feedback: { ...valid, states: { a: {}, b: {} } } },
         { feedback: { ...valid, states: { a: { default: true }, b: { default: true } } } },
         { feedback: { ...valid, fields: { state: { type: 'string' } } } },
+        { feedback: { ...valid, fields: { submissionToken: { type: 'string' } } } },
+        { feedback: { ...valid, fields: { submission_fingerprint: { type: 'string' } } } },
+        { feedback: { ...valid, idempotency: { retentionSeconds: 60 } } },
         { feedback: { ...valid, fields: { x: { type: 'string', fieldName: 'USERID' } } } },
         { feedback: { ...valid, fields: { user_id: { type: 'string' } } } },
         { feedback: { ...valid, fields: { someKey: { type: 'string' }, some_key: { type: 'string' } } } },
@@ -32,5 +35,13 @@ it('emits native model schemas with validators and transforms intact', () => {
     expect(Object.keys(plugin.schema)).toEqual(['contact_feedback', 'contact_rating'])
     expect(plugin.schema.contact_rating?.fields.score).toEqual({ type: 'number' })
     expect(plugin.schema.contact_feedback?.fields).not.toHaveProperty('data')
+    expect(plugin.schema.contact_feedback?.fields.submissionToken).toMatchObject({
+        unique: true,
+        input: false,
+        returned: false,
+    })
+    const disabled = contact({ models: { feedback: { ...valid, idempotency: false } } })
+    expect(disabled.schema.contact_feedback?.fields).not.toHaveProperty('submissionToken')
+    expect(disabled.schema.contact_feedback?.fields).not.toHaveProperty('submissionFingerprint')
     expect(() => contact({ models: { feedback: valid }, limits: { maxBulk: 101 } })).toThrow(/Contact|contact/u)
 })

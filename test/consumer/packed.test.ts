@@ -150,6 +150,7 @@ export const auth = betterAuth({ database, baseURL: 'http://localhost:3000', sec
 await (await getMigrations(auth.options)).runMigrations()
 const body={model:'feedback' as const,data:{score:'4',label:' hi '},idempotencyKey:crypto.randomUUID()}
 const first=await auth.api.createContact({body})
+assert.equal(first.replayed,false); if(first.replayed) throw new Error("Expected new submission")
 assert.equal((await auth.api.createContact({body})).id,first.id)
 assert.equal(first.record?.score,4); assert.equal(first.record?.label,'hi')
 assert.equal(database.prepare('SELECT score FROM contact_feedback').get()?.score,4)
@@ -178,7 +179,7 @@ import {contactClient} from 'better-contact/client'
 import type {auth} from './consumer.ts'
 export const client=createAuthClient({plugins:[contactClient<typeof auth>()]})
 void client.contact.create({model:'feedback',data:{score:'4',label:'hi'},idempotencyKey:crypto.randomUUID()}).then(({data})=>{
-  if(data?.record){ const n:number=data.record.score; void n
+  if(data && !data.replayed && data.record){ const n:number=data.record.score; void n
     // @ts-expect-error output is a number
     const bad:string=data.record.score; void bad
   }
@@ -219,11 +220,39 @@ export const auth=betterAuth({plugins:[contact({models:{report:{schema:{modelNam
             expect(schema).toMatch(/moderation_reports/u)
             expect(schema).toMatch(/author_id/u)
             expect(schema).toMatch(/set null/u)
-            expect(schema).toMatch(/contact__receipt/u)
-            expect(schema).toMatch(/token:[^\n]*unique/u)
+            expect(schema).not.toMatch(/contact__receipt/u)
+            expect(schema).toMatch(/submissionToken:[^\n]*unique/u)
+            expect(schema).toMatch(/submissionFingerprint/u)
             expect(schema).toMatch(/targetId:\s*text\(["']target_id["']\)\.notNull\(\)/u)
             expect(schema).toMatch(/rating:\s*(?:integer|real|numeric)\(["']rating["']\)/u)
             expect(schema).not.toMatch(/rating:[^\n]*notNull/u)
+            await writeFile(
+                join(consumer, 'auth.ts'),
+                (await readFile(join(consumer, 'auth.ts'), 'utf8')).replace(
+                    'idempotency:{replay:()=>true}',
+                    'idempotency:false',
+                ),
+            )
+            run(
+                process.execPath,
+                [
+                    join(consumer, 'node_modules/auth/dist/index.mjs'),
+                    'generate',
+                    '--config',
+                    './auth.ts',
+                    '--adapter',
+                    'drizzle',
+                    '--dialect',
+                    'sqlite',
+                    '--output',
+                    './disabled-schema.ts',
+                    '--yes',
+                ],
+                consumer,
+            )
+            expect(await readFile(join(consumer, 'disabled-schema.ts'), 'utf8')).not.toMatch(
+                /submissionToken|submissionFingerprint|submission_token|submission_fingerprint|contact__receipt/u,
+            )
             run('bun', ['build', 'client.ts', '--target', 'browser', '--outdir', 'bundle'], consumer)
             expect(await readFile(join(consumer, 'bundle/client.js'), 'utf8')).not.toMatch(
                 /createAuthEndpoint|node:sqlite|createService|packed-contact-secret/u,

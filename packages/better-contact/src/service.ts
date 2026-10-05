@@ -2,10 +2,11 @@
 import type { DBFieldAttribute } from '@better-auth/core/db'
 import type { Where } from '@better-auth/core/db/adapter'
 
+import { digest } from './canonical'
 import { listRecords, validateList } from './list'
-import { commitReceipt, digest, lookupReceipt, pack, payload, receiptToken, unpack } from './receipt'
-import type { ContactAdapter, ContactTransaction, Receipt } from './receipt'
-import { baseFields, fail, object, prepare, present, receiptTable, storageValue, tableName } from './schema'
+import { baseFields, fail, object, prepare, present, storageValue, tableName } from './schema'
+import { lookupSubmission, submissionToken } from './submission'
+import type { ContactAdapter } from './submission'
 import type {
     AccessContext,
     ContactModel,
@@ -173,11 +174,11 @@ export function createService<M extends ContactModels>(options: ContactOptions<M
         body: { model: string; data: unknown; idempotencyKey?: string },
     ) {
         const definition = model(body.model)
-        const keyed = definition.idempotency
+        const keyed = definition.idempotency !== false
         if (!keyed && body.idempotencyKey !== undefined)
-            fail('IDEMPOTENCY_DISABLED', 'Keyed creation is not enabled for this model')
-        const token = keyed ? await receiptToken(adapter, definition, actor, body.model, body.idempotencyKey) : null
-        const existing = token ? await lookupReceipt(adapter, token) : null
+            fail('IDEMPOTENCY_DISABLED', 'This model disables submission keys')
+        const token = keyed ? await submissionToken(definition, actor, body.model, body.idempotencyKey) : null
+        const existing = token ? await lookupSubmission(adapter, body.model, token) : null
         const now = Date.now()
         const window = windows.get(body.model)
         if (!window || now - window.start >= 60_000) windows.set(body.model, { start: now, count: 1 })
@@ -186,40 +187,39 @@ export function createService<M extends ContactModels>(options: ContactOptions<M
                 fail('RATE_LIMIT', 'Contact submission limit reached', 'TOO_MANY_REQUESTS')
             window.count++
         }
-        const defaults = { keys: [] as string[], ...(existing ? { values: payload(existing).data } : {}) }
+        const defaults = { keys: [] as string[], replay: !!existing }
         const data = await prepare(definition.fields, body.data, 'create', false, maxBytes, defaults)
-        const fingerprint = token
-            ? await digest(Object.fromEntries(Object.entries(data).filter(([key]) => !defaults.keys.includes(key))))
-            : ''
+        // Only normalized, explicitly submitted values identify content. Generated defaults and
+        // adapter encodings never enter this versioned fingerprint.
+        const submitted = Object.fromEntries(
+            Object.entries(data).filter(
+                ([key]) =>
+                    object(body.data) &&
+                    Object.hasOwn(body.data, key) &&
+                    body.data[key] !== undefined &&
+                    !defaults.keys.includes(key),
+            ),
+        )
+        const fingerprint = token ? 'v1:' + (await digest(['contact-content-v1', submitted])) : null
         const state = Object.entries(definition.states).find(([, value]) => value.default === true)![0]
-        const event = context(actor, body.model, 'create', null, data, state)
+        const event = context(actor, body.model, 'create', null, existing ? submitted : data, state)
         await authorize(definition, event)
         await options.guard?.(isolated(event))
-        async function replay(receipt: Receipt) {
-            const saved = payload(receipt)
-            const current = await find(adapter, { model: body.model, id: receipt.resourceId })
-            // Creation permission is re-evaluated with the original accepted defaults, even after a race.
-            await authorize(definition, {
-                ...event,
-                changes: saved.data,
-                targetState: typeof saved.response.record?.state === 'string' ? saved.response.record.state : state,
-            })
-            const permitted: unknown = await keyed!.replay(isolated({ ...event, record: current, changes: saved.data }))
+        async function replay(record: StoredRecord) {
+            // Recheck policy after races too. A receipt never grants read/list access or returns row contents.
+            await authorize(definition, { ...event, changes: submitted })
+            const replayPolicy = definition.idempotency && definition.idempotency.replay
+            const permitted: unknown = replayPolicy
+                ? await replayPolicy(isolated({ ...event, record, changes: submitted }))
+                : true
             if (permitted !== true) fail('NOT_FOUND', 'Contact record unavailable', 'NOT_FOUND')
-            if (receipt.fingerprint !== fingerprint)
-                fail('IDEMPOTENCY_CONFLICT', 'Submission key was used with different content', 'CONFLICT')
-            if (saved.response.record) {
-                for (const key of Object.keys(saved.response.record)) {
-                    if (
-                        key !== 'id' &&
-                        !Object.hasOwn(baseFields, key) &&
-                        (!Object.hasOwn(definition.fields, key) || definition.fields[key]!.returned === false)
-                    )
-                        delete saved.response.record[key]
-                }
-            }
-            // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Internal column is written only with HookResult values.
-            return { ...saved.response, hooks: unpack(receipt.hooks) as HookResult, changed: false, replayed: true }
+            if (record.submissionToken !== token || record.submissionFingerprint !== fingerprint)
+                fail(
+                    'IDEMPOTENCY_CONFLICT',
+                    'Submission key was used with different content or normalization version',
+                    'CONFLICT',
+                )
+            return { model: body.model, id: record.id, accepted: true as const, replayed: true as const }
         }
         if (existing) return replay(existing)
         const entering = definition.states[state]!.hooks
@@ -230,9 +230,9 @@ export function createService<M extends ContactModels>(options: ContactOptions<M
             ],
             { ...event, previous: null },
         )
-        let createdRecord: StoredRecord | undefined
-        const persist = async (database: ContactTransaction) => {
-            const record = await database.create<StoredRecord>({
+        let record: StoredRecord
+        try {
+            record = await adapter.create<StoredRecord>({
                 model: tableName(body.model),
                 data: {
                     ...data,
@@ -241,17 +241,23 @@ export function createService<M extends ContactModels>(options: ContactOptions<M
                     revision: 0,
                     createdAt: new Date(now),
                     updatedAt: new Date(now),
+                    ...(token ? { submissionToken: token, submissionFingerprint: fingerprint } : {}),
                 },
             })
-            createdRecord = record
-            return result(body.model, definition, record, { status: 'unknown', failed: [] })
+        } catch (error) {
+            // A unique-key race or lost INSERT acknowledgement may already have persisted the row.
+            // Only a positive authenticated lookup proves success; retain the original error otherwise.
+            let winner: StoredRecord | null = null
+            if (token) {
+                try {
+                    winner = await lookupSubmission(adapter, body.model, token)
+                } catch {
+                    /* Outcome remains uncertain. */
+                }
+            }
+            if (winner) return replay(winner)
+            throw error
         }
-        const committed = token
-            ? await commitReceipt(adapter, token, fingerprint, keyed!.retentionSeconds ?? 604_800, data, persist)
-            : null
-        if (committed && !committed.created) return replay(committed.receipt)
-        const response = committed ? payload(committed.receipt).response : await persist(adapter)
-        const record = createdRecord!
         const hooks = await after(
             [
                 ['afterCreate', definition.hooks?.afterCreate],
@@ -259,18 +265,11 @@ export function createService<M extends ContactModels>(options: ContactOptions<M
             ],
             { ...event, record, previous: null },
         )
-        if (committed) {
-            try {
-                await adapter.update({
-                    model: receiptTable,
-                    where: [{ field: 'id', value: committed.receipt.id }],
-                    update: { hooks: pack(hooks) },
-                })
-            } catch {
-                // A saved submission remains accepted; future replay reports unknown hook outcome.
-            }
+        return {
+            ...(await result(body.model, definition, record, hooks)),
+            accepted: true as const,
+            replayed: false as const,
         }
-        return { ...response, hooks, replayed: false }
     }
     async function read(adapter: ContactAdapter, actor: Actor, body: Target) {
         const definition = model(body.model)

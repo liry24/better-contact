@@ -85,16 +85,19 @@ import * as z from 'zod'
 import * as v from 'valibot'
 const database = new Database(':memory:')
 const auth = betterAuth({database, baseURL:'http://localhost:3000',secret:'runtime-contact-secret-more-than-thirty-two-characters',logger:{disabled:true},plugins:[contact({models:{
-  feedback:{fields:{score:{type:'number',validator:{input:z.string().transform(Number)}},label:{type:'string',validator:{input:v.pipe(v.string(),v.trim())}},priority:{type:'number',input:false,defaultValue:0}},states:{received:{default:true},reviewed:{}},access:{create:()=>true,update:()=>true,transition:()=>true,list:()=>({where:[]})},list:{filters:['state'],orderBy:['createdAt'],search:['label'],count:true}}
+  feedback:{idempotency:{anonymousScope:()=> 'server-verified-runtime-visitor'},fields:{score:{type:'number',validator:{input:z.string().transform(Number)}},label:{type:'string',validator:{input:v.pipe(v.string(),v.trim())}},priority:{type:'number',input:false,defaultValue:0}},states:{received:{default:true},reviewed:{}},access:{create:()=>true,update:()=>true,transition:()=>true,list:()=>({where:[]})},list:{filters:['state'],orderBy:['createdAt'],search:['label'],count:true}}
 }})]})
 await (await getMigrations(auth.options)).runMigrations()
-const first = await auth.api.createContact({body:{model:'feedback',data:{score:'4',label:' hi '}}})
+const body = {model:'feedback',data:{score:'4',label:' hi '},idempotencyKey:crypto.randomUUID()}
+const first = await auth.api.createContact({body})
+assert.equal(first.replayed,false)
+assert.deepEqual(await auth.api.createContact({body}),{model:'feedback',id:first.id,accepted:true,replayed:true})
 assert.equal(first.record.score,4)
 assert.equal(first.record.label,'hi')
 assert.equal(first.record.priority,0)
 assert.equal(database.prepare('SELECT score FROM contact_feedback').get().score,4)
 await assert.rejects(auth.api.readContact({body:{model:'feedback',id:first.id}}))
-await assert.rejects(auth.api.createContact({body:{model:'feedback',data:{score:'4',label:'hi',priority:1}}}))
+await assert.rejects(auth.api.createContact({body:{...body,data:{score:'4',label:'hi',priority:1}}}))
 const changed = await auth.api.updateContact({body:{model:'feedback',id:first.id,revision:first.revision,data:{label:' changed '}}})
 assert.equal(changed.record.label,'changed')
 const next = await auth.api.transitionContact({body:{model:'feedback',id:first.id,revision:changed.revision,state:'reviewed'}})

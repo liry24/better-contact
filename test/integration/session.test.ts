@@ -6,6 +6,7 @@ it('accepts real signup cookies and rejects tampered or revoked sessions', async
     const app = await setup({
         models: {
             report: {
+                idempotency: false as const,
                 fields: { target: { type: 'string' } },
                 states: { received: { default: true } },
                 access: { create: ({ session }) => session !== null },

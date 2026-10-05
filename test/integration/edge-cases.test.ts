@@ -14,6 +14,7 @@ it('validates onUpdate once, including transitions, with no factories for same-s
     const app = await setup({
         models: {
             feedback: {
+                idempotency: false as const,
                 states: { received: { default: true }, done: {} },
                 fields: {
                     text: { type: 'string' },
@@ -50,6 +51,7 @@ it('keeps saved identity on output failures and isolates callback mutation from 
     const app = await setup({
         models: {
             feedback: {
+                idempotency: false as const,
                 fields: { text: { type: 'string', validator: { output: z.never() } } },
                 states: { received: { default: true } },
                 access: {
@@ -90,6 +92,7 @@ it('rejects non-native validator output and lossy JSON before writing; supports 
     const app = await setup({
         models: {
             feedback: {
+                idempotency: false as const,
                 states: { received: { default: true } },
                 fields: {
                     value: {
@@ -133,6 +136,7 @@ it('runs an application abuse guard on both HTTP and direct calls before persist
         guard,
         models: {
             feedback: {
+                idempotency: false as const,
                 states: { received: { default: true } },
                 fields: { text: { type: 'string' } },
                 access: { create: () => true },

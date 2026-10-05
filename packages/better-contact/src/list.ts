@@ -2,7 +2,7 @@
 import type { DBFieldAttribute } from '@better-auth/core/db'
 import type { DBAdapter, Where } from '@better-auth/core/db/adapter'
 
-import { digest, pack, unpack } from './receipt'
+import { digest, pack, unpack } from './canonical'
 import { baseFields, fail, object, present, storageValue, tableName } from './schema'
 import type { ContactModel, ListQuery, StoredRecord } from './types'
 
