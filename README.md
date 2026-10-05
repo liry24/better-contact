@@ -18,11 +18,27 @@ export const auth = betterAuth({
         feedback: {
           idempotency: false, // Anonymous example without a verified visitor identity.
           fields: {
-            message: { type: 'string', validator: { input: z.string().trim().min(1).max(2000) } },
-            priority: { type: 'number', input: false, defaultValue: 0 },
+            message: {
+              type: 'string',
+              validator: {
+                input: z.string().trim().min(1).max(2000),
+              },
+            },
+            priority: {
+              type: 'number',
+              input: false,
+              defaultValue: 0,
+            },
           },
-          states: { received: { default: true }, reviewed: {} },
-          access: { create: () => true },
+          states: {
+            received: {
+              default: true,
+            },
+            reviewed: {},
+          },
+          access: {
+            create: () => true,
+          },
           hooks: {
             afterCreate: async ({ record }) => {
               // Notify staff through your application's delivery service.
@@ -49,10 +65,14 @@ import { createAuthClient } from 'better-auth/client'
 import { contactClient } from 'better-contact/client'
 import type { auth } from './auth'
 
-const client = createAuthClient({ plugins: [contactClient<typeof auth>()] })
+const client = createAuthClient({
+  plugins: [contactClient<typeof auth>()],
+})
 const { data, error } = await client.contact.create({
   model: 'feedback',
-  data: { message: 'Please add keyboard shortcuts' },
+  data: {
+    message: 'Please add keyboard shortcuts',
+  },
 })
 ```
 
@@ -67,7 +87,17 @@ For a report, require `session` in `create` and verify the submitted target agai
 `list` returns `false` or `{ where: [...] }`. Returning `{ where: [] }` deliberately grants access to every row in that model. A scoped example:
 
 ```ts
-list: ({ session }) => (session ? { where: [{ field: 'userId', value: session.user.id }] } : false)
+list: ({ session }) => {
+  if (!session) return false
+  return {
+    where: [
+      {
+        field: 'userId',
+        value: session.user.id,
+      },
+    ],
+  }
+}
 ```
 
 List permission grants access to every matching row; it does not call `read` for each result. Keep these policies consistent. Scopes accept up to 20 AND conditions on untransformed scalar columns, with `eq`, `ne`, `in`, `lt`, `lte`, `gt`, `gte`. Unsupported scopes are rejected. Filtering happens in the database before pagination.
@@ -86,9 +116,20 @@ list: {
 ```ts
 await client.contact.list({
   model: 'feedback',
-  filters: [{ field: 'state', value: 'received' }],
-  orderBy: { field: 'createdAt', direction: 'desc' },
-  search: { field: 'message', term: 'keyboard' },
+  filters: [
+    {
+      field: 'state',
+      value: 'received',
+    },
+  ],
+  orderBy: {
+    field: 'createdAt',
+    direction: 'desc',
+  },
+  search: {
+    field: 'message',
+    term: 'keyboard',
+  },
   count: true,
   limit: 20,
 })
@@ -106,7 +147,10 @@ Retry protection is **on by default**. Every protected model requires an `idempo
 const submission = {
   model: 'report' as const,
   idempotencyKey: crypto.randomUUID(),
-  data: { targetId: 'public-resource', reason: 'incorrect information' },
+  data: {
+    targetId: 'public-resource',
+    reason: 'incorrect information',
+  },
 }
 const result = await client.contact.create(submission)
 ```
@@ -144,9 +188,15 @@ schema: {
   fields: {
     userId: {
       fieldName: 'author_id',
-      references: { model: 'user', field: 'id', onDelete: 'set null' },
+      references: {
+        model: 'user',
+        field: 'id',
+        onDelete: 'set null',
+      },
     },
-    createdAt: { fieldName: 'submitted_at' },
+    createdAt: {
+      fieldName: 'submitted_at',
+    },
   },
 }
 ```
