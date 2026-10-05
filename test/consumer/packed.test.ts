@@ -9,12 +9,18 @@ import { fileURLToPath } from 'node:url'
 import { expect, it } from 'vite-plus/test'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
-function run(program: string, args: string[], cwd: string): string {
+function run(program: string, args: string[], cwd: string, env: NodeJS.ProcessEnv = process.env): string {
     if (process.platform === 'win32' && program === 'npm')
-        return run(process.execPath, [join(dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js'), ...args], cwd)
-    if (program === 'pnpm') return run('npm', ['exec', '--yes', '--package=pnpm@10.25.0', '--', 'pnpm', ...args], cwd)
+        return run(
+            process.execPath,
+            [join(dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js'), ...args],
+            cwd,
+            env,
+        )
+    if (program === 'pnpm')
+        return run('npm', ['exec', '--yes', '--package=pnpm@10.25.0', '--', 'pnpm', ...args], cwd, env)
     try {
-        return execFileSync(program, args, { cwd, encoding: 'utf8', stdio: 'pipe', timeout: 240_000 })
+        return execFileSync(program, args, { cwd, env, encoding: 'utf8', stdio: 'pipe', timeout: 240_000 })
     } catch (error) {
         if (error instanceof Error && 'stdout' in error)
             throw new Error(`${error.message}\n${String(error.stdout)}`, { cause: error })
@@ -45,7 +51,14 @@ it('verifies one exact MIT-licensed tarball with real auth, CLI, types and brows
         expect(run('tar', ['-xOf', tarball, 'package/LICENSE'], directory)).toBe(
             await readFile(join(root, 'LICENSE'), 'utf8'),
         )
-        expect(JSON.parse(run('tar', ['-xOf', tarball, 'package/package.json'], directory)).license).toBe('MIT')
+        const packedManifest = JSON.parse(run('tar', ['-xOf', tarball, 'package/package.json'], directory)) as {
+            name: string
+            version: string
+            license: string
+        }
+        expect(packedManifest.license).toBe('MIT')
+        expect(packedManifest.name).toBe('better-contact')
+        const archiveName = `better-contact-${before}.tgz`
         const managers = process.env.CONTACT_PACKAGE_MANAGER
             ? [process.env.CONTACT_PACKAGE_MANAGER]
             : ['bun', 'npm', 'pnpm']
@@ -54,7 +67,7 @@ it('verifies one exact MIT-licensed tarball with real auth, CLI, types and brows
             assert(['bun', 'npm', 'pnpm'].includes(manager))
             const consumer = join(directory, manager)
             await mkdir(consumer)
-            await copyFile(tarball, join(consumer, 'package.tgz'))
+            await copyFile(tarball, join(consumer, archiveName))
             await writeFile(
                 join(consumer, 'package.json'),
                 JSON.stringify({
@@ -62,7 +75,7 @@ it('verifies one exact MIT-licensed tarball with real auth, CLI, types and brows
                     private: true,
                     type: 'module',
                     dependencies: {
-                        'better-contact': 'file:./package.tgz',
+                        'better-contact': `file:./${archiveName}`,
                         'better-auth': version,
                         '@better-auth/core': version,
                         zod: '^4.5.4',
@@ -71,7 +84,26 @@ it('verifies one exact MIT-licensed tarball with real auth, CLI, types and brows
                     devDependencies: { typescript: '^7.0.2', '@types/node': '^26.6.3', auth: '1.7.7' },
                 }),
             )
-            run(manager, ['install', '--ignore-scripts'], consumer)
+            // Bun caches relative file tarballs across projects. Keep concurrent package checks isolated.
+            run(manager, ['install', '--ignore-scripts'], consumer, {
+                ...process.env,
+                BUN_INSTALL_CACHE_DIR: join(consumer, '.bun-cache'),
+            })
+            const installed = join(consumer, 'node_modules/better-contact')
+            expect(JSON.parse(await readFile(join(installed, 'package.json'), 'utf8'))).toMatchObject({
+                name: packedManifest.name,
+                version: packedManifest.version,
+            })
+            for (const entry of entries.filter((name) => name.startsWith('package/dist/') && !name.endsWith('/'))) {
+                expect(await readFile(join(installed, entry.slice('package/'.length)), 'utf8')).toBe(
+                    run('tar', ['-xOf', tarball, entry], directory),
+                )
+            }
+            expect(
+                createHash('sha256')
+                    .update(await readFile(join(consumer, archiveName)))
+                    .digest('hex'),
+            ).toBe(before)
             await writeFile(
                 join(consumer, 'tsconfig.json'),
                 JSON.stringify({
