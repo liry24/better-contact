@@ -45,3 +45,32 @@ it('emits native model schemas with validators and transforms intact', () => {
     expect(disabled.schema.contact_feedback?.fields).not.toHaveProperty('submissionFingerprint')
     expect(() => contact({ models: { feedback: valid }, limits: { maxBulk: 101 } })).toThrow(/Contact|contact/u)
 })
+
+it('rejects client namespace collisions at startup and keeps canonical names bijective', () => {
+    for (const name of [
+        'create',
+        'read',
+        'list',
+        'update',
+        'transition',
+        'delete',
+        'bulk',
+        'maintain',
+        'then',
+        'catch',
+        'finally',
+        'constructor',
+        'to_string',
+        'value_of',
+        'a__b',
+        'a_',
+        'a_1',
+        'a_b_c',
+    ]) {
+        expect(() => contact({ models: { [name]: valid } })).toThrow(/contact model/u)
+    }
+    expect(() => contact({ models: { a_b: valid, a__b: valid } })).toThrow(/contact model/u)
+    const plugin = contact({ models: { abuse_report: valid } })
+    expect(plugin.endpoints.abuseReportCreateContact.path).toBe('/contact/abuse-report/create')
+    expect(plugin.endpoints.createContact.path).toBe('/contact/create')
+})

@@ -36,13 +36,13 @@ export const auth = betterAuth({
             },
             reviewed: {},
           },
-          access: {
-            create: () => true,
-          },
-          hooks: {
-            afterCreate: async ({ record }) => {
-              // Notify staff through your application's delivery service.
-              // Persisted success is preserved if this hook fails.
+          operations: {
+            create: {
+              authorize: () => true,
+              after: async ({ record }): Promise<void> => {
+                // Notify staff through your application's delivery service.
+                // Persisted success is preserved if this hook fails.
+              },
             },
           },
         },
@@ -58,7 +58,7 @@ Generate the schema through Better Auth, then apply the migration using your dat
 npx auth@latest generate
 ```
 
-The example creates `contact_feedback` with `message`, `priority`, `id`, `userId`, `state`, `revision`, `createdAt` and `updatedAt`. Model keys must be lowercase ASCII identifiers. Field names and optional native `fieldName` mappings must be safe, distinct identifiers. Reserved names and unsupported storage mappings fail at configuration time. There is no mandatory JSON column; `type: 'json'` is an explicit choice.
+The example creates `contact_feedback` with `message`, `priority`, `id`, `userId`, `state`, `revision`, `createdAt` and `updatedAt`. Model keys use lowercase ASCII letters/digits, optionally separated by single underscores; each segment starts with a letter and the entire key is at most 40 characters. `abuse_report` becomes `client.contact.abuseReport` and `/contact/abuse-report`. Generic operation names (`create`, `read`, `list`, `update`, `transition`, `delete`, `bulk`, `maintain`), Promise/prototype names (`then`, `catch`, `finally`, `constructor`, `prototype`, `to_string`, etc.), empty segments and normalization collisions are rejected at startup. Field names and optional native `fieldName` mappings must be safe, distinct identifiers. Reserved names and unsupported storage mappings fail at configuration time. There is no mandatory JSON column; `type: 'json'` stores objects/arrays, with null allowed on optional fields. Use native string/number/boolean fields for root scalar values; unsupported JSON scalars are rejected before writing. Nested JSON strings remain strings. Names whose camelCase spelling cannot round-trip through the native client (such as `a_b_c`) are also rejected.
 
 ```ts
 import { createAuthClient } from 'better-auth/client'
@@ -68,35 +68,44 @@ import type { auth } from './auth'
 const client = createAuthClient({
   plugins: [contactClient<typeof auth>()],
 })
-const { data, error } = await client.contact.create({
-  model: 'feedback',
+const { data, error } = await client.contact.feedback.create({
   data: {
     message: 'Please add keyboard shortcuts',
   },
 })
 ```
 
-The server API is `auth.api.createContact({ body: { model, data }, headers })`. It runs the same validation and authorization as HTTP. Missing headers mean an anonymous caller, never privileged access. Native fields infer inputs and outputs; Standard Schema inputs support asynchronous validation and transformations (including Zod and Valibot). Defaults and adapter transforms run once per write. `input: false` fields are managed by server code, and `returned: false` fields stay out of responses. Output validators run after adapter output transforms; input validators never rerun on reads.
+Use `auth.api.feedbackCreateContact({ body: { data }, headers })` for a fixed model. Generic methods remain available for every operation, including `client.contact.create({ model, data })` and `auth.api.createContact({ body: { model, data }, headers })`. For a runtime model choice, construct a discriminated union of the complete input; narrow arbitrary strings before calling. Generic results are discriminated unions: check `result.model` to access that model's fields and states. Bound methods already return their specific model. Both server forms run the same validation and authorization as HTTP. Missing headers mean an anonymous caller, never privileged access. Native fields infer inputs and outputs; Standard Schema inputs support asynchronous validation and transformations (including Zod and Valibot). Defaults and adapter transforms run once per write. `input: false` fields are managed by server code, and `returned: false` fields stay out of responses. Output validators run after adapter output transforms; input validators never rerun on reads.
+
+Adapter decoding follows `transform.output`. Encoded JSON/array strings therefore infer JSON values; date strings and numeric booleans retain adapter-dependent unions. Use an output validator to establish a narrower response type.
+
+Successful contact responses carry a versioned `x-better-contact-dates` header listing actual Date paths. The client restores only those values before success callbacks; ISO-looking strings and nested JSON strings stay strings. The HTTP body remains ordinary JSON, and direct API values retain native Dates. Preserve this header through proxies and CORS (the plugin appends its expose-header name). Other auth routes and error parsers are unchanged. Missing or invalid metadata is a transport error, never guessed from field names or string contents.
+
+Metadata is bounded to 4 KiB, 512 paths and depth 32; output traversal is bounded to 100,000 values and supports plain JSON values plus Dates. Read/list output beyond these limits returns `CONTACT_OUTPUT`; reduce the page size or simplify the output. Saved mutations retain identity/revision and return `record: null, output: 'failed'`; an oversized bulk response similarly omits successful mutation records while preserving each saved result. These are output failures, not rejected writes.
 
 ## Access
 
-Every operation denies by default, including reading your own submission. Configure `access.create`, `read`, `update`, `transition`, `delete`, and `list` separately. Policies receive `{ model, operation, session, record, changes, targetState, headers }`. Sessions are resolved by Better Auth from the caller's headers. Policies and hooks receive copies; mutating them does not modify the write.
+Every operation denies by default, including reading your own submission. Configure `operations.create.authorize`, `operations.read.authorize`, `operations.update.authorize`, `operations.transition.authorize`, `operations.delete.authorize`, and `operations.list.authorize` separately. Policies receive `{ model, operation, session, record, changes, targetState, headers }`. Sessions are resolved by Better Auth from the caller's headers. Policies and hooks receive copies; mutating them does not modify the write.
 
 For a report, require `session` in `create` and verify the submitted target against your application's data and access rules. There is no admin plugin dependency. An application may grant staff `read` and `list` while denying `transition`. `update` accepts only configured input fields and cannot set state, identity, timestamps or revision. Bulk operations cannot bypass these rules.
 
-`list` returns `false` or `{ where: [...] }`. Returning `{ where: [] }` deliberately grants access to every row in that model. A scoped example:
+`operations.list.authorize` returns `false` or `{ where: [...] }`. Returning `{ where: [] }` deliberately grants access to every row in that model. A scoped example:
 
 ```ts
-list: ({ session }) => {
-  if (!session) return false
-  return {
-    where: [
-      {
-        field: 'userId',
-        value: session.user.id,
-      },
-    ],
-  }
+operations: {
+  list: {
+    authorize: ({ session }) => {
+      if (!session) return false
+      return {
+        where: [
+          {
+            field: 'userId',
+            value: session.user.id,
+          },
+        ],
+      }
+    },
+  },
 }
 ```
 
@@ -172,7 +181,7 @@ Missing or invalid anonymous scope rejects creation before writing. The plugin n
 
 Two private native columns, `submissionToken` (unique) and `submissionFingerprint`, are saved in the same INSERT as the contact fields. There is no receipt table, snapshot, transaction requirement or D1-specific wrapper. Protected rows retain these values for their lifetime; there is no TTL or automatic cleanup. Physical deletion, including a configured cascade, ends protection: the same key can then create a new row. Columns are nullable for pre-existing records, which gain no retrospective retry protection.
 
-The first accepted write returns its normal creation result plus `accepted: true, replayed: false`. A retry returns only `{ model, id, accepted: true, replayed: true }`. Narrow on `replayed` before accessing creation data. Receipts grant no read/list access and expose neither original content nor later staff edits. Replays recheck `access.create`, the guard and any replay policy. The create policy receives normalized submitted values on replay; omitted defaults are not regenerated or reconstructed from mutable rows. Keep creation policies compatible with that distinction, or deny replay explicitly.
+The first accepted write returns its normal creation result plus `accepted: true, replayed: false`. A retry returns only `{ model, id, accepted: true, replayed: true }`. Narrow on `replayed` before accessing creation data. Receipts grant no read/list access and expose neither original content nor later staff edits. Replays recheck `operations.create.authorize`, the guard and any replay policy. The create policy receives normalized submitted values on replay; omitted defaults are not regenerated or reconstructed from mutable rows. Keep creation policies compatible with that distinction, or deny replay explicitly.
 
 The content fingerprint uses deterministic normalization of explicitly supplied values, with sorted object keys and distinct representations for dates and arrays. Native defaults, omitted-value validator defaults and adapter encodings are excluded. Submitted input validators run again; they must be deterministic. Same key with different normalized content returns `CONTACT_IDEMPOTENCY_CONFLICT`. Fingerprints have an explicit format version; unknown versions or changed normalization fail closed instead of permitting a second insert. New keys may intentionally submit identical content.
 
@@ -215,11 +224,15 @@ schema: {
 | `contact.delete`     | `deleteContact`     | `{ model, id, revision }`                              |
 | `contact.bulk`       | `bulkContacts`      | `{ items: [{ operation, model, id, revision, ... }] }` |
 
+Every table entry also has a model-bound equivalent: `client.contact.feedback.<operation>` and `auth.api.feedbackCreateContact`, `feedbackReadContact`, `feedbackListContacts`, `feedbackUpdateContact`, `feedbackTransitionContact`, `feedbackDeleteContact`, `feedbackBulkContacts`. Omit `model` from bound input and bulk items. Generic bulk can mix models; bound bulk stays within its model. Both forms use native POST endpoints and the same policy/validation service.
+
 Exactly one configured state has `default: true`. State keys are inferred as literals and have no built-in open/closed/terminal meaning. Unknown states are rejected. A same-state transition checks permission and revision but does not write or call hooks.
 
-Model hooks are `beforeCreate`/`afterCreate`, `beforeUpdate`/`afterUpdate`, `beforeTransition`/`afterTransition`, and `beforeDelete`/`afterDelete`. Each state's `hooks` may define `beforeEnter`/`afterEnter` and `beforeLeave`/`afterLeave`.
+Each `operations.create`, `read`, `list`, `update`, `transition` and `delete` may define `authorize`, `before` and `after`. Each state's `hooks` may define `beforeEnter`/`afterEnter` and `beforeLeave`/`afterLeave`.
 
-Creation runs model `beforeCreate`, initial-state `beforeEnter`, persistence, model `afterCreate`, then initial-state `afterEnter`. A transition runs model `beforeTransition`, old-state `beforeLeave`, new-state `beforeEnter`, persistence, old-state `afterLeave`, new-state `afterEnter`, then model `afterTransition`. Hooks receive policy context plus `previous`; after hooks see the saved `record` (null after deletion). Before hooks can reject by throwing. They can run for a write that subsequently loses a race, so keep external side effects in after hooks.
+Creation runs model `create.before`, initial-state `beforeEnter`, persistence, model `create.after`, then initial-state `afterEnter`. A transition runs model `transition.before`, old-state `beforeLeave`, new-state `beforeEnter`, persistence, old-state `afterLeave`, new-state `afterEnter`, then model `transition.after`. Inline callbacks infer the model key, state keys and native fields; no context type import is needed. If a hook refers back to `auth`, give it an explicit `Promise<void>` return type to break the inference cycle. `changes` contains partial, validated native values before adapter input transforms (including generated managed values); replays omit defaults. `record` and `previous` contain adapter output, including hidden fields, before response validators/filtering. Hooks receive policy context plus `previous`; after hooks see the saved `record` (null after deletion). Before hooks can reject by throwing. They can run for a write that subsequently loses a race, so keep external side effects in after hooks.
+
+Read authorizes the fetched record, runs `before`, validates the response, then runs `after`. List authorizes the query scope, runs `before`, fetches the page, then runs `after`. List hooks have no record; each response includes hook status. `onHookError.id` is null for a list. Hook failure names use `create.after`, `read.after`, etc.; state hook names remain `afterEnter`/`afterLeave`.
 
 Mutations require the last read revision and use the adapter's atomic guarded operations. A concurrent write returns `CONTACT_CONFLICT`; reload before retrying. Bulk actions are sequential, bounded (50 by default, maximum 100), and return an ordered result for every item. They are not a transaction and may partially succeed. Duplicate items are not silently deduplicated.
 

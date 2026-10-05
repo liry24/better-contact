@@ -4,12 +4,16 @@ import type { BetterAuthPlugin } from 'better-auth'
 import { APIError, createAuthEndpoint, getAuthoritativeSessionFromCtx } from 'better-auth/api'
 import * as z from 'zod'
 
-import { buildSchema } from './schema'
+import { contactResponse } from './response'
+import { baseFields, buildSchema, submissionFields } from './schema'
 import { createService } from './service'
 import type {
     BulkBody,
     BulkResult,
     ContactModels,
+    ContactFields,
+    InferredContactOptions,
+    InferredModels,
     ContactOptions,
     CreateBody,
     CreateResult,
@@ -17,6 +21,7 @@ import type {
     ListBody,
     ListResult,
     MutationResult,
+    MaintenanceBody,
     ReadResult,
     TargetBody,
     TransitionBody,
@@ -25,14 +30,20 @@ import type {
 
 export type {
     AccessContext,
+    InferredContactOptions,
     BulkBody,
     BulkResult,
     ContactFields,
     ContactInput,
+    JsonValue,
     ContactModel,
     ContactModels,
     ContactOptions,
     ContactRecord,
+    ContactStoredRecord,
+    ContactChanges,
+    ModelContext,
+    ModelHookContext,
     ContactSession,
     CreateBody,
     CreateResult,
@@ -43,6 +54,7 @@ export type {
     ListQuery,
     ListResult,
     MutationResult,
+    MaintenanceBody,
     Operation,
     ReadResult,
     Scope,
@@ -67,54 +79,70 @@ function typed<T>(schema: z.ZodType) {
     return z.custom<T>((value) => schema.safeParse(value).success)
 }
 
-/** Native Better Auth plugin. Every public endpoint resolves its session and invokes the same policy service. */
-export function contact<const M extends ContactModels>(options: ContactOptions<M>) {
-    const schema = buildSchema(options.models)
-    const service = createService(options)
+type Bound<T, B extends boolean> = T extends unknown ? (B extends true ? Omit<T, 'model'> : T) : never
+function endpointSet<M extends ContactModels, P extends string, B extends boolean>(
+    service: ReturnType<typeof createService>,
+    prefix: P,
+    bound: B,
+    model?: string,
+) {
+    const shape = <T extends z.ZodRawShape>(value: z.ZodObject<T>) =>
+        bound
+            ? z.strictObject(Object.fromEntries(Object.entries(value.shape).filter(([key]) => key !== 'model')))
+            : value
+    const body = <T>(value: T) => ({ ...value, ...(bound ? { model } : {}) })
     return {
-        id: 'contact',
-        version: '0.0.0',
-        options,
-        schema,
-        endpoints: {
-            createContact: createAuthEndpoint(
-                '/contact/create',
-                {
-                    method: 'POST',
-                    metadata: { noStore: true },
-                    body: typed<CreateBody<M>>(
+        createContact: createAuthEndpoint(
+            `${prefix}/create` as const,
+            {
+                method: 'POST',
+                metadata: { noStore: true },
+                body: typed<Bound<CreateBody<M>, B>>(
+                    shape(
                         z.strictObject({ model: identifier, data: z.unknown(), idempotencyKey: z.string().optional() }),
                     ),
-                },
-                async (ctx) => {
-                    const actor = {
-                        session: await getAuthoritativeSessionFromCtx(ctx),
-                        headers: new Headers(ctx.headers),
-                    }
-                    return (await service.create(ctx.context.adapter, actor, ctx.body)) as CreateResult<M>
-                },
-            ),
-            readContact: createAuthEndpoint(
-                '/contact/read',
-                {
-                    method: 'POST',
-                    metadata: { noStore: true },
-                    body: typed<TargetBody<M>>(target),
-                },
-                async (ctx) => {
-                    const actor = {
-                        session: await getAuthoritativeSessionFromCtx(ctx),
-                        headers: new Headers(ctx.headers),
-                    }
-                    return (await service.read(ctx.context.adapter, actor, ctx.body)) as ReadResult<M>
-                },
-            ),
-            listContacts: createAuthEndpoint(
-                '/contact/list',
-                {
-                    method: 'POST',
-                    metadata: { noStore: true },
-                    body: typed<ListBody<M>>(
+                ),
+            },
+            async (ctx) => {
+                const actor = {
+                    session: await getAuthoritativeSessionFromCtx(ctx),
+                    headers: new Headers(ctx.headers),
+                }
+                return contactResponse(
+                    ctx,
+                    (await service.create(
+                        ctx.context.adapter,
+                        actor,
+                        body(ctx.body) as CreateBody<M>,
+                    )) as CreateResult<M>,
+                )
+            },
+        ),
+        readContact: createAuthEndpoint(
+            `${prefix}/read` as const,
+            {
+                method: 'POST',
+                metadata: { noStore: true },
+                body: typed<Bound<TargetBody<M>, B>>(shape(target)),
+            },
+            async (ctx) => {
+                const actor = {
+                    session: await getAuthoritativeSessionFromCtx(ctx),
+                    headers: new Headers(ctx.headers),
+                }
+                return contactResponse(
+                    ctx,
+                    (await service.read(ctx.context.adapter, actor, body(ctx.body) as TargetBody<M>)) as ReadResult<M>,
+                )
+            },
+        ),
+        listContacts: createAuthEndpoint(
+            `${prefix}/list` as const,
+            {
+                method: 'POST',
+                metadata: { noStore: true },
+                body: typed<Bound<ListBody<M>, B>>(
+                    shape(
                         z.strictObject({
                             model: identifier,
                             cursor: z.string().min(1).max(131_072).optional(),
@@ -144,132 +172,208 @@ export function contact<const M extends ContactModels>(options: ContactOptions<M
                             count: z.boolean().optional(),
                         }),
                     ),
-                },
-                async (ctx) => {
-                    const actor = {
-                        session: await getAuthoritativeSessionFromCtx(ctx),
-                        headers: new Headers(ctx.headers),
-                    }
-                    return (await service.list(ctx.context.adapter, actor, ctx.body)) as ListResult<M>
-                },
-            ),
-            updateContact: createAuthEndpoint(
-                '/contact/update',
-                {
-                    method: 'POST',
-                    metadata: { noStore: true },
-                    body: typed<UpdateBody<M>>(update),
-                },
-                async (ctx) => {
-                    const actor = {
-                        session: await getAuthoritativeSessionFromCtx(ctx),
-                        headers: new Headers(ctx.headers),
-                    }
-                    return (await service.mutate(ctx.context.adapter, actor, 'update', ctx.body)) as MutationResult<M>
-                },
-            ),
-            transitionContact: createAuthEndpoint(
-                '/contact/transition',
-                {
-                    method: 'POST',
-                    metadata: { noStore: true },
-                    body: typed<TransitionBody<M>>(transition),
-                },
-                async (ctx) => {
-                    const actor = {
-                        session: await getAuthoritativeSessionFromCtx(ctx),
-                        headers: new Headers(ctx.headers),
-                    }
-                    return (await service.mutate(
+                ),
+            },
+            async (ctx) => {
+                const actor = {
+                    session: await getAuthoritativeSessionFromCtx(ctx),
+                    headers: new Headers(ctx.headers),
+                }
+                return contactResponse(
+                    ctx,
+                    (await service.list(ctx.context.adapter, actor, body(ctx.body) as ListBody<M>)) as ListResult<M>,
+                )
+            },
+        ),
+        updateContact: createAuthEndpoint(
+            `${prefix}/update` as const,
+            {
+                method: 'POST',
+                metadata: { noStore: true },
+                body: typed<Bound<UpdateBody<M>, B>>(shape(update)),
+            },
+            async (ctx) => {
+                const actor = {
+                    session: await getAuthoritativeSessionFromCtx(ctx),
+                    headers: new Headers(ctx.headers),
+                }
+                return contactResponse(
+                    ctx,
+                    (await service.mutate(
+                        ctx.context.adapter,
+                        actor,
+                        'update',
+                        body(ctx.body) as UpdateBody<M>,
+                    )) as MutationResult<M>,
+                )
+            },
+        ),
+        transitionContact: createAuthEndpoint(
+            `${prefix}/transition` as const,
+            {
+                method: 'POST',
+                metadata: { noStore: true },
+                body: typed<Bound<TransitionBody<M>, B>>(shape(transition)),
+            },
+            async (ctx) => {
+                const actor = {
+                    session: await getAuthoritativeSessionFromCtx(ctx),
+                    headers: new Headers(ctx.headers),
+                }
+                return contactResponse(
+                    ctx,
+                    (await service.mutate(
                         ctx.context.adapter,
                         actor,
                         'transition',
-                        ctx.body,
-                    )) as MutationResult<M>
-                },
-            ),
-            deleteContact: createAuthEndpoint(
-                '/contact/delete',
-                {
-                    method: 'POST',
-                    metadata: { noStore: true },
-                    body: typed<TargetBody<M> & { revision: number }>(deletion),
-                },
-                async (ctx) => {
-                    const actor = {
-                        session: await getAuthoritativeSessionFromCtx(ctx),
-                        headers: new Headers(ctx.headers),
+                        body(ctx.body) as TransitionBody<M>,
+                    )) as MutationResult<M>,
+                )
+            },
+        ),
+        deleteContact: createAuthEndpoint(
+            `${prefix}/delete` as const,
+            {
+                method: 'POST',
+                metadata: { noStore: true },
+                body: typed<Bound<TargetBody<M> & { revision: number }, B>>(shape(deletion)),
+            },
+            async (ctx) => {
+                const actor = {
+                    session: await getAuthoritativeSessionFromCtx(ctx),
+                    headers: new Headers(ctx.headers),
+                }
+                return contactResponse(
+                    ctx,
+                    (await service.mutate(
+                        ctx.context.adapter,
+                        actor,
+                        'delete',
+                        body(ctx.body) as TargetBody<M> & { revision: number },
+                    )) as DeleteResult,
+                )
+            },
+        ),
+        bulkContacts: createAuthEndpoint(
+            `${prefix}/bulk` as const,
+            {
+                method: 'POST',
+                metadata: { noStore: true },
+                body: typed<{ items: Bound<BulkBody<M>['items'][number], B>[] }>(
+                    z.strictObject({
+                        items: z
+                            .array(
+                                z.discriminatedUnion('operation', [
+                                    shape(update).extend({ operation: z.literal('update') }),
+                                    shape(transition).extend({ operation: z.literal('transition') }),
+                                    shape(deletion).extend({ operation: z.literal('delete') }),
+                                ]),
+                            )
+                            .min(1)
+                            .max(service.maxBulk),
+                    }),
+                ),
+            },
+            async (ctx) => {
+                const actor = {
+                    session: await getAuthoritativeSessionFromCtx(ctx),
+                    headers: new Headers(ctx.headers),
+                }
+                const results: BulkResult<M>['results'] = []
+                // Each item is independently authorized and conditionally persisted. This is intentionally not atomic.
+                for (const item of ctx.body.items) {
+                    try {
+                        results.push({
+                            status: 'success',
+                            result: (await service.mutate(
+                                ctx.context.adapter,
+                                actor,
+                                item.operation,
+                                body(item) as BulkBody<M>['items'][number],
+                            )) as MutationResult<M> | DeleteResult,
+                        })
+                    } catch (error) {
+                        results.push({
+                            status: 'failed',
+                            code: error instanceof APIError ? (error.body?.code ?? 'CONTACT_FAILED') : 'CONTACT_FAILED',
+                        })
                     }
-                    return (await service.mutate(ctx.context.adapter, actor, 'delete', ctx.body)) as DeleteResult
-                },
-            ),
-            bulkContacts: createAuthEndpoint(
-                '/contact/bulk',
-                {
-                    method: 'POST',
-                    metadata: { noStore: true },
-                    body: typed<BulkBody<M>>(
-                        z.strictObject({
-                            items: z
-                                .array(
-                                    z.discriminatedUnion('operation', [
-                                        update.extend({ operation: z.literal('update') }),
-                                        transition.extend({ operation: z.literal('transition') }),
-                                        deletion.extend({ operation: z.literal('delete') }),
-                                    ]),
-                                )
-                                .min(1)
-                                .max(service.maxBulk),
-                        }),
-                    ),
-                },
-                async (ctx) => {
-                    const actor = {
-                        session: await getAuthoritativeSessionFromCtx(ctx),
-                        headers: new Headers(ctx.headers),
-                    }
-                    const results: BulkResult<M>['results'] = []
-                    // Each item is independently authorized and conditionally persisted. This is intentionally not atomic.
-                    for (const item of ctx.body.items) {
-                        try {
-                            results.push({
-                                status: 'success',
-                                result: (await service.mutate(ctx.context.adapter, actor, item.operation, item)) as
-                                    | MutationResult<M>
-                                    | DeleteResult,
-                            })
-                        } catch (error) {
-                            results.push({
-                                status: 'failed',
-                                code:
-                                    error instanceof APIError
-                                        ? (error.body?.code ?? 'CONTACT_FAILED')
-                                        : 'CONTACT_FAILED',
-                            })
-                        }
-                    }
-                    return { results }
-                },
-            ),
-            // An explicit trusted boundary. No path, client action, or request-derived bypass flag.
-            maintainContact: createAuthEndpoint.serverOnly(
-                {
-                    method: 'POST',
-                    body: z.discriminatedUnion('operation', [
+                }
+                return contactResponse(ctx, { results })
+            },
+        ),
+        // An explicit trusted boundary. No path, client action, or request-derived bypass flag.
+        maintainContact: createAuthEndpoint.serverOnly(
+            {
+                method: 'POST',
+                body: typed<MaintenanceBody<M>>(
+                    z.discriminatedUnion('operation', [
                         update.extend({ operation: z.literal('update') }),
                         transition.extend({ operation: z.literal('transition') }),
                         deletion.extend({ operation: z.literal('delete') }),
                     ]),
-                },
-                async (ctx) =>
-                    service.mutate(
-                        ctx.context.adapter,
-                        { session: null, headers: new Headers() },
-                        ctx.body.operation,
-                        ctx.body,
-                        true,
-                    ),
-            ),
+                ),
+            },
+            async (ctx) =>
+                (await service.mutate(
+                    ctx.context.adapter,
+                    { session: null, headers: new Headers() },
+                    ctx.body.operation,
+                    ctx.body,
+                    true,
+                )) as MutationResult<M> | DeleteResult,
+        ),
+    }
+}
+
+type ModelPath<S extends string> = S extends `${infer H}_${infer T}` ? `${H}-${ModelPath<T>}` : S
+type Camel<S extends string> = S extends `${infer H}_${infer T}` ? `${H}${Capitalize<Camel<T>>}` : S
+type ModelEndpointMap<M extends ContactModels> = {
+    [K in keyof M & string]: {
+        [
+            E in keyof Omit<
+                ReturnType<typeof endpointSet<Pick<M, K>, `/contact/${ModelPath<K>}`, true>>,
+                'maintainContact'
+            > as `${Camel<K>}${Capitalize<E & string>}`
+        ]: ReturnType<typeof endpointSet<Pick<M, K>, `/contact/${ModelPath<K>}`, true>>[E]
+    }
+}[keyof M & string]
+type Intersection<U> = (U extends unknown ? (value: U) => void : never) extends (value: infer I) => void ? I : never
+
+/** Native endpoints for both fixed-model and discriminated generic operations. */
+export function contact<
+    const F extends Record<string, ContactFields>,
+    const S extends Record<string, Record<string, unknown>>,
+    const I extends Record<string, unknown>,
+>(configuration: InferredContactOptions<F, S, I>) {
+    type M = InferredModels<F, S, I>
+    const options = configuration as unknown as ContactOptions<M>
+    const schema = buildSchema(options.models) as {
+        [K in keyof M & string as `contact_${K}`]: {
+            modelName: string
+            fields: M[K]['fields'] &
+                typeof baseFields &
+                (M[K] extends { idempotency: false } ? {} : typeof submissionFields)
+        }
+    }
+    const service = createService(options)
+    const models: Record<string, unknown> = {}
+    for (const name of Object.keys(options.models)) {
+        const endpoints = endpointSet(service, `/contact/${name.replaceAll('_', '-')}`, true, name)
+        for (const [key, endpoint] of Object.entries(endpoints)) {
+            if (key === 'maintainContact') continue
+            const camel = name.replace(/_([a-z0-9])/gu, (_, letter: string) => letter.toUpperCase())
+            models[camel + key[0]!.toUpperCase() + key.slice(1)] = endpoint
+        }
+    }
+    return {
+        id: 'contact',
+        version: '0.0.0',
+        options: configuration as InferredContactOptions<F, S, I> & { models: M },
+        schema,
+        endpoints: {
+            ...endpointSet<M, '/contact', false>(service, '/contact', false),
+            ...(models as Intersection<ModelEndpointMap<M>> & {}),
         },
     } satisfies BetterAuthPlugin
 }

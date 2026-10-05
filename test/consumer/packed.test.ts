@@ -48,6 +48,10 @@ it('verifies one exact MIT-licensed tarball with real auth, CLI, types and brows
             entries.every((entry) => /^package\/(?:dist(?:\/.*)?|package.json|README.md|LICENSE)$/u.test(entry)),
         ).toBe(true)
         expect(entries).toContain('package/LICENSE')
+        expect(entries.some((entry) => entry.endsWith('.map'))).toBe(false)
+        for (const entry of entries.filter((name) => /\.(?:m?js|d\.m?ts)$/u.test(name))) {
+            expect(run('tar', ['-xOf', tarball, entry], directory)).not.toMatch(/sourceMappingURL|declarationMap/u)
+        }
         expect(run('tar', ['-xOf', tarball, 'package/LICENSE'], directory)).toBe(
             await readFile(join(root, 'LICENSE'), 'utf8'),
         )
@@ -89,10 +93,21 @@ it('verifies one exact MIT-licensed tarball with real auth, CLI, types and brows
                 }),
             )
             // Bun caches relative file tarballs across projects. Keep concurrent package checks isolated.
-            run(manager, ['install', '--ignore-scripts'], consumer, {
-                ...process.env,
-                BUN_INSTALL_CACHE_DIR: join(consumer, '.bun-cache'),
-            })
+            run(
+                manager,
+                [
+                    'install',
+                    '--ignore-scripts',
+                    ...(manager === 'pnpm' ? ['--store-dir', join(consumer, '.pnpm-store')] : []),
+                ],
+                consumer,
+                {
+                    ...process.env,
+                    BUN_INSTALL_CACHE_DIR: join(consumer, '.bun-cache'),
+                    npm_config_cache: join(consumer, '.npm-cache'),
+                    npm_config_engine_strict: 'true',
+                },
+            )
             const installed = join(consumer, 'node_modules/better-contact')
             expect(JSON.parse(await readFile(join(installed, 'package.json'), 'utf8'))).toMatchObject({
                 name: packedManifest.name,
@@ -127,31 +142,46 @@ it('verifies one exact MIT-licensed tarball with real auth, CLI, types and brows
                         target: 'ES2022',
                         types: ['node'],
                         strict: true,
+                        exactOptionalPropertyTypes: true,
+                        noUncheckedIndexedAccess: true,
                         skipLibCheck: true,
                         noEmit: true,
                         allowImportingTsExtensions: true,
                     },
-                    include: ['consumer.ts', 'client.ts'],
+                    include: ['consumer.ts', 'client.ts', 'type-soundness.ts', 'transport.ts'],
                 }),
             )
             await writeFile(
                 join(consumer, 'consumer.ts'),
                 `import assert from 'node:assert/strict'
+import { verifyTransport } from './transport.ts'
 import { DatabaseSync } from 'node:sqlite'
 import { betterAuth } from 'better-auth'
 import { getMigrations } from 'better-auth/db/migration'
 import { contact } from 'better-contact'
+import { contactClient } from 'better-contact/client'
+import { createAuthClient } from 'better-auth/client'
 import * as z from 'zod'
 import * as v from 'valibot'
 const database = new DatabaseSync(':memory:')
 export const auth = betterAuth({ database, baseURL: 'http://localhost:3000', secret: 'packed-contact-secret-more-than-thirty-two-characters', plugins: [contact({models: {
-  feedback: { fields: {score: {type:'number', validator:{input:z.string().transform(Number)}}, label:{type:'string',validator:{input:v.pipe(v.string(),v.trim())}}, priority:{type:'number',input:false,defaultValue:0}}, states: {received:{default:true},reviewed:{}}, list:{filters:['state'],orderBy:['createdAt'],search:['label'],count:true}, idempotency:{replay:()=>true,anonymousScope:()=> 'server-verified-test-visitor'}, access:{create:()=>true,list:()=>({where:[]}),transition:()=>true} },
+  feedback: { fields: {score: {type:'number', validator:{input:z.string().transform(Number)}}, label:{type:'string',validator:{input:v.pipe(v.string(),v.trim())}}, priority:{type:'number',input:false,defaultValue:0}}, states: {received:{default:true},reviewed:{}}, list:{filters:['state'],orderBy:['createdAt'],search:['label'],count:true}, idempotency:{replay:()=>true,anonymousScope:()=> 'server-verified-test-visitor'}, operations: {
+create: { authorize: ()=>true },
+list: { authorize: ()=>({where:[]}) },
+transition: { authorize: ()=>true }
+} },
 }})], logger:{disabled:true} })
 await (await getMigrations(auth.options)).runMigrations()
 const body={model:'feedback' as const,data:{score:'4',label:' hi '},idempotencyKey:crypto.randomUUID()}
 const first=await auth.api.createContact({body})
 assert.equal(first.replayed,false); if(first.replayed) throw new Error("Expected new submission")
 assert.equal((await auth.api.createContact({body})).id,first.id)
+assert.equal((await auth.api.feedbackCreateContact({body:{data:body.data,idempotencyKey:body.idempotencyKey}})).id,first.id)
+const browser = createAuthClient({baseURL:'http://localhost:3000',plugins:[contactClient<typeof auth>()],fetchOptions:{customFetchImpl:(input,init)=>auth.handler(new Request(input,init))}})
+assert.equal((await browser.contact.feedback.create({data:body.data,idempotencyKey:body.idempotencyKey})).data?.id,first.id)
+assert.equal((await browser.contact.create(body)).data?.id,first.id)
+assert.equal((await browser.contact.feedback.list({})).data?.records.length,1)
+assert.equal((await browser.contact.list({model:'feedback'})).data?.records.length,1)
 assert.equal(first.record?.score,4); assert.equal(first.record?.label,'hi')
 assert.equal(database.prepare('SELECT score FROM contact_feedback').get()?.score,4)
 const next=await auth.api.transitionContact({body:{model:'feedback',id:first.id,revision:first.revision,state:'reviewed'}})
@@ -170,6 +200,8 @@ if(false){
   await auth.api.createContact({body:{model:'feedback',data:{score:'4',label:'hi'}}})
 }
 database.close()
+const transportDatabase = new DatabaseSync(':memory:')
+try { await verifyTransport(transportDatabase) } finally { transportDatabase.close() }
 `,
             )
             await writeFile(
@@ -189,6 +221,18 @@ void client.contact.transition({model:'feedback',id:'x',revision:0,state:'closed
 // @ts-expect-error management method is server-only
 void client.maintainContact({})
 `,
+            )
+            await writeFile(
+                join(consumer, 'transport.ts'),
+                (await readFile(join(root, 'test/fixtures/transport.ts'), 'utf8'))
+                    .replaceAll('../../packages/better-contact/src/index', 'better-contact')
+                    .replaceAll('../../packages/better-contact/src/client', 'better-contact/client'),
+            )
+            await writeFile(
+                join(consumer, 'type-soundness.ts'),
+                (await readFile(join(root, 'test/type-soundness.ts'), 'utf8'))
+                    .replaceAll('../packages/better-contact/src/index', 'better-contact')
+                    .replaceAll('../packages/better-contact/src/client', 'better-contact/client'),
             )
             run(process.execPath, [join(consumer, 'node_modules/typescript/bin/tsc'), '--noEmit'], consumer)
             run(process.execPath, ['consumer.ts'], consumer)
@@ -258,6 +302,9 @@ export const auth=betterAuth({plugins:[contact({models:{report:{schema:{modelNam
                 /createAuthEndpoint|node:sqlite|createService|packed-contact-secret/u,
             )
             expect(await hash()).toBe(before)
+            process.stdout.write(
+                `PASS consumer Node ${process.version}, ${manager}, Better Auth ${installedAuth.version}, artifact ${before}\n`,
+            )
         }
     } finally {
         assert.equal(dirname(resolve(directory)), resolve(tmpdir()))

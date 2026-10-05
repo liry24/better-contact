@@ -43,7 +43,11 @@ it('persists real native columns and async validators, defaults, mappings and tr
                     schemaDefault: { type: 'string', validator: { input: z.string().default('schema') } },
                     date: { type: 'date', required: false },
                 },
-                access: { create: allow, read: allow, update: allow },
+                operations: {
+                    create: { authorize: allow },
+                    read: { authorize: allow },
+                    update: { authorize: allow },
+                },
             },
         },
     })
@@ -128,18 +132,23 @@ it('uses authoritative sessions and per-operation policies for HTTP and direct A
                 idempotency: false as const,
                 states,
                 fields: { text: { type: 'string' } },
-                access: { create: allow },
+                operations: {
+                    create: { authorize: allow },
+                },
             },
             report: {
                 idempotency: false as const,
                 states,
                 fields: { targetId: { type: 'string' }, reason: { type: 'string' } },
-                access: {
-                    create: ({ session, changes }) => !!session && targets.get(String(changes.targetId)) === 'owner-1',
-                    read: isStaff,
-                    list: (ctx) => (isStaff(ctx) ? { where: [] } : false),
-                    update: isStaff,
-                    transition: () => false,
+                operations: {
+                    create: {
+                        authorize: ({ session, changes }) =>
+                            !!session && targets.get(String(changes.targetId)) === 'owner-1',
+                    },
+                    read: { authorize: isStaff },
+                    list: { authorize: (ctx) => (isStaff(ctx) ? { where: [] } : false) },
+                    update: { authorize: isStaff },
+                    transition: { authorize: () => false },
                 },
             },
         },
@@ -236,12 +245,14 @@ it('orders custom state hooks, rejects before persistence, skips no-ops and repo
                         },
                     },
                 },
-                access: { create: allow, transition: allow, read: allow },
-                hooks: {
-                    beforeCreate: hook('create-before'),
-                    afterCreate: hook('create-after'),
-                    beforeTransition: hook('transition-before'),
-                    afterTransition: hook('transition-after'),
+                operations: {
+                    create: { authorize: allow, before: hook('create-before'), after: hook('create-after') },
+                    transition: {
+                        authorize: allow,
+                        before: hook('transition-before'),
+                        after: hook('transition-after'),
+                    },
+                    read: { authorize: allow },
                 },
             },
         },
@@ -297,14 +308,17 @@ it('CAS makes concurrent transitions have exactly one winner and one after hook'
                 idempotency: false as const,
                 states,
                 fields: { text: { type: 'string' } },
-                access: { create: allow, transition: allow },
-                hooks: {
-                    beforeTransition: async () => {
-                        entered++
-                        if (entered === 2) release()
-                        await barrier
+                operations: {
+                    create: { authorize: allow },
+                    transition: {
+                        authorize: allow,
+                        before: async () => {
+                            entered++
+                            if (entered === 2) release()
+                            await barrier
+                        },
+                        after: after,
                     },
-                    afterTransition: after,
                 },
             },
         },
@@ -330,14 +344,16 @@ it('scopes before pagination, isolates owners and rejects unsupported scopes and
                 idempotency: false as const,
                 states,
                 fields: { score: { type: 'number', validator: { input: z.number().int().min(1).max(5) } } },
-                access: {
-                    create: ({ session }) => !!session,
-                    list: ({ session }) =>
-                        unsafe
-                            ? ({ where: [{ field: 'userId', value: session!.user.id, connector: 'OR' }] } as any)
-                            : session
-                              ? { where: [{ field: 'userId', value: session.user.id }] }
-                              : false,
+                operations: {
+                    create: { authorize: ({ session }) => !!session },
+                    list: {
+                        authorize: ({ session }) =>
+                            unsafe
+                                ? ({ where: [{ field: 'userId', value: session!.user.id, connector: 'OR' }] } as any)
+                                : session
+                                  ? { where: [{ field: 'userId', value: session.user.id }] }
+                                  : false,
+                    },
                 },
             },
         },
@@ -407,10 +423,12 @@ it('guards size/rate, validates defaults/async output and preserves accepted sub
                         },
                     },
                 },
-                access: { create: allow },
-                hooks: {
-                    afterCreate: () => {
-                        throw new Error('private notification error')
+                operations: {
+                    create: {
+                        authorize: allow,
+                        after: () => {
+                            throw new Error('private notification error')
+                        },
                     },
                 },
             },
@@ -419,7 +437,7 @@ it('guards size/rate, validates defaults/async output and preserves accepted sub
     cleanups.push(app.close)
     const body = { model: 'feedback' as const, data: { text: 'hello' } }
     const result = await app.auth.api.createContact({ body })
-    expect(result).toMatchObject({ record: { text: 'HELLO' }, hooks: { status: 'failed', failed: ['afterCreate'] } })
+    expect(result).toMatchObject({ record: { text: 'HELLO' }, hooks: { status: 'failed', failed: ['create.after'] } })
     expect((await app.request('create', body)).status).toBe(200)
     await expect(
         app.auth.api.createContact({ body: { model: 'feedback', data: { text: 'x'.repeat(100) } } }),
@@ -438,7 +456,12 @@ it('bulk returns honest ordered partial results and management never bypasses va
             idempotency: false as const,
             states,
             fields: { text: { type: 'string' } },
-            access: { create: allow, update: allow, delete: allow, transition: allow },
+            operations: {
+                create: { authorize: allow },
+                update: { authorize: allow },
+                delete: { authorize: allow },
+                transition: { authorize: allow },
+            },
         },
     } satisfies ContactModels
     const app = await setup({ models })
@@ -458,6 +481,7 @@ it('bulk returns honest ordered partial results and management never bypasses va
     expect(result.results[1]).toMatchObject({ code: 'CONTACT_CONFLICT' })
     expect(app.database.prepare('SELECT count(*) AS total FROM contact_feedback').get()?.total).toBe(0)
     await expect(
+        // @ts-expect-error Runtime callers must also reject unknown states.
         app.auth.api.maintainContact({ body: { ...target, operation: 'transition', revision: 0, state: 'nonsense' } }),
     ).rejects.toMatchObject({ body: { code: 'CONTACT_STATE' } })
 })

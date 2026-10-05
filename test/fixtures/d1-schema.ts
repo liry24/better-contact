@@ -56,4 +56,6 @@ export const submissions = sqliteTable('submissions', {
     body: text('body').notNull(),
     enabled: integer('enabled', { mode: 'boolean' }).notNull(),
     dueAt: timestamp('dueAt').notNull(),
+    labels: text('labels', { mode: 'json' }).notNull(),
+    payload: text('payload', { mode: 'json' }).notNull(),
 })

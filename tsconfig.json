@@ -1,6 +1,8 @@
 {
     "compilerOptions": {
         "allowImportingTsExtensions": true,
+        "sourceMap": false,
+        "declarationMap": false,
         "exactOptionalPropertyTypes": true,
         "lib": ["ES2023", "DOM"],
         "module": "ESNext",

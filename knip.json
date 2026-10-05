@@ -2,7 +2,7 @@
     "ignoreExportsUsedInFile": true,
     "workspaces": {
         ".": {
-            "entry": ["test/**/*.test.ts", "test/types.ts"],
+            "entry": ["test/**/*.test.ts", "test/types.ts", "test/type-soundness.ts"],
             "project": ["*.ts", "test/**/*.ts"],
             "ignoreDependencies": ["auth"]
         },

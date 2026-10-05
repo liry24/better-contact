@@ -45,7 +45,7 @@ function context(
 
 async function authorize(definition: ContactModel, event: AccessContext, managed = false) {
     if (managed) return
-    const policy = definition.access?.[event.operation === 'list' ? 'read' : event.operation]
+    const policy = definition.operations?.[event.operation === 'list' ? 'read' : event.operation]?.authorize
     const allowed: unknown = policy ? await policy(isolated(event)) : false
     if (allowed !== true) {
         if (event.record) fail('NOT_FOUND', 'Contact record unavailable', 'NOT_FOUND')
@@ -157,7 +157,7 @@ export function createService<M extends ContactModels>(options: ContactOptions<M
                 try {
                     await options.onHookError?.({
                         model: event.model,
-                        id: event.record?.id ?? event.previous!.id,
+                        id: event.record?.id ?? event.previous?.id ?? null,
                         hook: name,
                         error,
                     })
@@ -225,7 +225,7 @@ export function createService<M extends ContactModels>(options: ContactOptions<M
         const entering = definition.states[state]!.hooks
         await before(
             [
-                ['beforeCreate', definition.hooks?.beforeCreate],
+                ['create.before', definition.operations?.create?.before],
                 ['beforeEnter', entering?.beforeEnter],
             ],
             { ...event, previous: null },
@@ -260,7 +260,7 @@ export function createService<M extends ContactModels>(options: ContactOptions<M
         }
         const hooks = await after(
             [
-                ['afterCreate', definition.hooks?.afterCreate],
+                ['create.after', definition.operations?.create?.after],
                 ['afterEnter', entering?.afterEnter],
             ],
             { ...event, record, previous: null },
@@ -274,16 +274,24 @@ export function createService<M extends ContactModels>(options: ContactOptions<M
     async function read(adapter: ContactAdapter, actor: Actor, body: Target) {
         const definition = model(body.model)
         const record = await find(adapter, body)
-        await authorize(definition, context(actor, body.model, 'read', record))
-        return { model: body.model, record: await present(definition.fields, record) }
+        const event = { ...context(actor, body.model, 'read', record), previous: null }
+        await authorize(definition, event)
+        await before([['read.before', definition.operations?.read?.before]], event)
+        const output = await present(definition.fields, record)
+        const hooks = await after([['read.after', definition.operations?.read?.after]], event)
+        return { model: body.model, record: output, hooks }
     }
     async function list(adapter: ContactAdapter, actor: Actor, body: { model: string } & ListQuery) {
         const definition = model(body.model)
-        const policy = definition.access?.list
-        const allowed = policy ? await policy(isolated(context(actor, body.model, 'list', null))) : false
+        const policy = definition.operations?.list?.authorize
+        const event = { ...context(actor, body.model, 'list', null), previous: null }
+        const allowed = policy ? await policy(isolated(event)) : false
         if (allowed === false) fail('FORBIDDEN', 'Contact operation denied', 'FORBIDDEN')
         const where = scope(definition, allowed)
-        return listRecords(adapter, definition, body.model, body, where, maxPage)
+        await before([['list.before', definition.operations?.list?.before]], event)
+        const page = await listRecords(adapter, definition, body.model, body, where, maxPage)
+        const hooks = await after([['list.after', definition.operations?.list?.after]], event)
+        return { ...page, hooks }
     }
     async function mutate(
         adapter: ContactAdapter,
@@ -311,12 +319,12 @@ export function createService<M extends ContactModels>(options: ContactOptions<M
             return result(body.model, definition, record, { status: 'ok', failed: [] }, false)
         const previous = record
         if (operation === 'delete') {
-            await before([['beforeDelete', definition.hooks?.beforeDelete]], { ...event, previous })
+            await before([['delete.before', definition.operations?.delete?.before]], { ...event, previous })
             const deleted = await adapter.consumeOne<StoredRecord>({ model: tableName(body.model), where })
             if (!deleted) fail('CONFLICT', 'Contact revision changed; reload before retrying', 'CONFLICT')
             return {
                 deleted: true as const,
-                hooks: await after([['afterDelete', definition.hooks?.afterDelete]], {
+                hooks: await after([['delete.after', definition.operations?.delete?.after]], {
                     ...event,
                     record: null,
                     previous: deleted,
@@ -328,11 +336,11 @@ export function createService<M extends ContactModels>(options: ContactOptions<M
         const beforeHooks: NamedHook[] =
             operation === 'transition'
                 ? [
-                      ['beforeTransition', definition.hooks?.beforeTransition],
+                      ['transition.before', definition.operations?.transition?.before],
                       ['beforeLeave', leaving?.beforeLeave],
                       ['beforeEnter', entering?.beforeEnter],
                   ]
-                : [['beforeUpdate', definition.hooks?.beforeUpdate]]
+                : [['update.before', definition.operations?.update?.before]]
         await before(beforeHooks, { ...event, previous })
         const saved = await adapter.incrementOne<StoredRecord>({
             model: tableName(body.model),
@@ -346,9 +354,9 @@ export function createService<M extends ContactModels>(options: ContactOptions<M
                 ? [
                       ['afterLeave', leaving?.afterLeave],
                       ['afterEnter', entering?.afterEnter],
-                      ['afterTransition', definition.hooks?.afterTransition],
+                      ['transition.after', definition.operations?.transition?.after],
                   ]
-                : [['afterUpdate', definition.hooks?.afterUpdate]]
+                : [['update.after', definition.operations?.update?.after]]
         const hooks = await after(afterHooks, { ...event, record: saved, previous })
         return result(body.model, definition, saved, hooks)
     }

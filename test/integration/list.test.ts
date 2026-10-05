@@ -20,9 +20,12 @@ it('intersects allowlisted filters/search/count with permission scopes and order
                     search: ['text'],
                     count: true,
                 },
-                access: {
-                    create: () => true,
-                    list: ({ session }) => (session ? { where: [{ field: 'userId', value: session.user.id }] } : false),
+                operations: {
+                    create: { authorize: () => true },
+                    list: {
+                        authorize: ({ session }) =>
+                            session ? { where: [{ field: 'userId', value: session.user.id }] } : false,
+                    },
                 },
             },
         },
@@ -118,7 +121,9 @@ it('keeps query capabilities opt-in and rejects unsafe configured fields', async
                 idempotency: false as const,
                 fields: { text: { type: 'string' } },
                 states: { received: { default: true } },
-                access: { list: () => ({ where: [] }) },
+                operations: {
+                    list: { authorize: () => ({ where: [] }) },
+                },
             },
         },
     })

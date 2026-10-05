@@ -5,9 +5,13 @@ import { getMigrations } from 'better-auth/db/migration'
 import { testUtils } from 'better-auth/plugins'
 
 import { contact } from '../packages/better-contact/src/index'
-import type { ContactModels, ContactOptions } from '../packages/better-contact/src/index'
+import type { ContactFields, InferredContactOptions } from '../packages/better-contact/src/index'
 
-export async function setup<const M extends ContactModels>(options: ContactOptions<M>, filename = ':memory:') {
+export async function setup<
+    const F extends Record<string, ContactFields>,
+    const S extends Record<string, Record<string, unknown>>,
+    const I extends Record<string, unknown>,
+>(options: InferredContactOptions<F, S, I>, filename = ':memory:') {
     const fixtures = testUtils()
     const database = new DatabaseSync(filename)
     database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;')
@@ -38,10 +42,13 @@ export async function setup<const M extends ContactModels>(options: ContactOptio
         return { id: saved.id, headers }
     }
     async function signup(name = crypto.randomUUID()) {
-        const response = await auth.api.signUpEmail({
-            body: { name, email: `${name}@example.com`, password: 'a-long-contact-password' },
-            asResponse: true,
-        })
+        const response = await auth.handler(
+            new Request('http://localhost:3000/api/auth/sign-up/email', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ name, email: `${name}@example.com`, password: 'a-long-contact-password' }),
+            }),
+        )
         if (!response.ok) throw new Error(await response.text())
         const data = (await response.json()) as { user: { id: string } }
         const headers = new Headers({

@@ -20,7 +20,11 @@ it('uses native table/column mappings and preserves configured user deletion beh
                     },
                     fields: { text: { type: 'string', fieldName: 'body' } },
                     states: { received: { default: true } },
-                    access: { create: ({ session }) => !!session, read: () => true, list: () => ({ where: [] }) },
+                    operations: {
+                        create: { authorize: ({ session }) => !!session },
+                        read: { authorize: () => true },
+                        list: { authorize: () => ({ where: [] }) },
+                    },
                 },
             },
         })

@@ -9,7 +9,9 @@ it('accepts real signup cookies and rejects tampered or revoked sessions', async
                 idempotency: false as const,
                 fields: { target: { type: 'string' } },
                 states: { received: { default: true } },
-                access: { create: ({ session }) => session !== null },
+                operations: {
+                    create: { authorize: ({ session }) => session !== null },
+                },
             },
         },
     })

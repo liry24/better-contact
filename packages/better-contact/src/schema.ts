@@ -1,5 +1,6 @@
 /* oxlint-disable no-await-in-loop -- Field validation/default/transform order is deterministic. */
-import type { DBFieldAttribute } from '@better-auth/core/db'
+import type { DBFieldAttribute, DBPrimitive } from '@better-auth/core/db'
+import { toKebabCase } from '@better-auth/core/utils/string'
 import type { BetterAuthPlugin } from 'better-auth'
 import { APIError } from 'better-auth/api'
 
@@ -28,6 +29,33 @@ const reserved = new Set(
 )
 export const tableName = (model: string) => `contact_${model}`
 const normalized = (name: string) => name.replace(/([a-z0-9])([A-Z])/gu, '$1_$2').toLowerCase()
+function applicationFields(fields: ContactFields): ContactFields {
+    return Object.fromEntries(
+        Object.entries(fields).map(([name, field]) => {
+            if (!['json', 'string[]', 'number[]'].includes(String(field.type))) return [name, field]
+            // Native adapter decoding otherwise revives ISO-looking JSON/array strings as Dates.
+            // Decode at the supported field-transform boundary, preserving the user's transform exactly once.
+            const transform = field.transform
+            return [
+                name,
+                {
+                    ...field,
+                    transform: {
+                        ...transform,
+                        output: async (stored: DBPrimitive) => {
+                            const value = transform?.output ? await transform.output(stored) : stored
+                            if (typeof value !== 'string') return value
+                            const decoded: unknown = JSON.parse(value)
+                            if (typeof decoded === 'string')
+                                throw new Error('Contact JSON root strings require a native string field')
+                            return decoded
+                        },
+                    },
+                },
+            ]
+        }),
+    )
+}
 export function modelFields(definition: ContactModels[string]): ContactFields {
     return {
         ...(definition.idempotency !== false ? submissionFields : {}),
@@ -47,10 +75,41 @@ export function modelFields(definition: ContactModels[string]): ContactFields {
 export function buildSchema(models: ContactModels) {
     const schema: NonNullable<BetterAuthPlugin['schema']> = {}
     const tables = new Set(['user', 'session', 'account', 'verification'])
+    const namespaces = new Set([
+        'create',
+        'read',
+        'list',
+        'update',
+        'transition',
+        'delete',
+        'bulk',
+        'maintain',
+        'then',
+        'catch',
+        'finally',
+        'constructor',
+        'prototype',
+        'to-string',
+        'value-of',
+        'to-locale-string',
+        'has-own-property',
+        'is-prototype-of',
+        'property-is-enumerable',
+    ])
     if (!Object.keys(models).length) throw new Error('Contact requires at least one model')
     for (const [model, definition] of Object.entries(models)) {
-        if (!/^[a-z][a-z0-9_]{0,39}$/u.test(model) || reserved.has(model))
+        // Require canonical segments so runtime kebab-case and inferred camelCase stay bijective.
+        const namespace = model.replaceAll('_', '-')
+        const camel = model.replace(/_([a-z0-9])/gu, (_, letter: string) => letter.toUpperCase())
+        if (
+            !/^[a-z][a-z0-9]*(?:_[a-z][a-z0-9]*)*$/u.test(model) ||
+            model.length > 40 ||
+            reserved.has(model) ||
+            namespaces.has(namespace) ||
+            toKebabCase(camel) !== namespace
+        )
             throw new Error(`Unsafe contact model: ${model}`)
+        namespaces.add(namespace)
         const states = Object.entries(definition.states)
         if (states.filter(([, value]) => value.default === true).length !== 1)
             throw new Error(`Contact ${model} requires exactly one default state`)
@@ -111,7 +170,7 @@ export function buildSchema(models: ContactModels) {
             if (field.input === false && field.required !== false && field.defaultValue === undefined)
                 throw new Error(`Required managed contact field needs a default: ${key}`)
         }
-        schema[tableName(model)] = { modelName, fields: { ...core, ...definition.fields } }
+        schema[tableName(model)] = { modelName, fields: { ...core, ...applicationFields(definition.fields) } }
         if (
             definition.idempotency !== undefined &&
             definition.idempotency !== false &&
@@ -171,7 +230,7 @@ export function storageValue(field: DBFieldAttribute, value: unknown): boolean {
                 Array.from(value).every((item) => typeof item === 'number' && Number.isFinite(item))
             )
         case 'json':
-            return jsonValue(value)
+            return (Array.isArray(value) || object(value)) && jsonValue(value)
         default:
             return false
     }

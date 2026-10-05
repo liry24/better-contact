@@ -30,6 +30,9 @@ try {
     const archiveName = `better-contact-${before}.tgz`
     const entries = run('tar', ['-tzf', tarball]).trim().split(/\r?\n/u)
     assert(entries.every((entry) => /^package\/(?:dist(?:\/.*)?|package.json|README.md|LICENSE)$/u.test(entry)))
+    assert(!entries.some((entry) => entry.endsWith('.map')))
+    for (const entry of entries.filter((name) => /\.(?:m?js|d\.m?ts)$/u.test(name)))
+        assert(!/sourceMappingURL|declarationMap/u.test(run('tar', ['-xOf', tarball, entry])))
     assert.equal(run('tar', ['-xOf', tarball, 'package/LICENSE']), await readFile(join(root, 'LICENSE'), 'utf8'))
     const manifest = JSON.parse(run('tar', ['-xOf', tarball, 'package/package.json']))
     assert.equal(manifest.engines.node, '>=22.0.0')
@@ -81,14 +84,21 @@ import { betterAuth } from 'better-auth'
 import { getMigrations } from 'better-auth/db/migration'
 import { contact } from 'better-contact'
 import { contactClient } from 'better-contact/client'
+import { createAuthClient } from 'better-auth/client'
 import * as z from 'zod'
 import * as v from 'valibot'
 const database = new Database(':memory:')
 const auth = betterAuth({database, baseURL:'http://localhost:3000',secret:'runtime-contact-secret-more-than-thirty-two-characters',logger:{disabled:true},plugins:[contact({models:{
-  feedback:{idempotency:{anonymousScope:()=> 'server-verified-runtime-visitor'},fields:{score:{type:'number',validator:{input:z.string().transform(Number)}},label:{type:'string',validator:{input:v.pipe(v.string(),v.trim())}},priority:{type:'number',input:false,defaultValue:0}},states:{received:{default:true},reviewed:{}},access:{create:()=>true,update:()=>true,transition:()=>true,list:()=>({where:[]})},list:{filters:['state'],orderBy:['createdAt'],search:['label'],count:true}}
+  feedback:{idempotency:{anonymousScope:()=> 'server-verified-runtime-visitor'},fields:{score:{type:'number',validator:{input:z.string().transform(Number)}},label:{type:'string',validator:{input:v.pipe(v.string(),v.trim())}},priority:{type:'number',input:false,defaultValue:0},text:{type:'string'},labels:{type:'string[]'},payload:{type:'json'},happenedAt:{type:'date'}},states:{received:{default:true},reviewed:{}},operations: {
+create: { authorize: ()=>true },
+update: { authorize: ()=>true },
+transition: { authorize: ()=>true },
+list: { authorize: ()=>({where:[]}) }
+},list:{filters:['state'],orderBy:['createdAt'],search:['label'],count:true}}
 }})]})
 await (await getMigrations(auth.options)).runMigrations()
-const body = {model:'feedback',data:{score:'4',label:' hi '},idempotencyKey:crypto.randomUUID()}
+const iso = '2026-10-05T01:02:03.123Z'
+const body = {model:'feedback',data:{score:'4',label:' hi ',text:iso,labels:[iso],payload:{at:iso,nested:[{at:iso}]},happenedAt:new Date(iso)},idempotencyKey:crypto.randomUUID()}
 const first = await auth.api.createContact({body})
 assert.equal(first.replayed,false)
 assert.deepEqual(await auth.api.createContact({body}),{model:'feedback',id:first.id,accepted:true,replayed:true})
@@ -110,6 +120,24 @@ assert.equal(response.status,200)
 assert.equal((await response.json()).records.length,1)
 assert.equal((await auth.handler(new Request('http://localhost:3000/api/auth/contact/maintain',{method:'POST',headers:{'content-type':'application/json'},body:'{}'}))).status,404)
 assert.equal(contactClient().id,'contact')
+const client = createAuthClient({baseURL:'http://localhost:3000',plugins:[contactClient()],fetchOptions:{customFetchImpl:(input,init)=>auth.handler(new Request(input,init))}})
+for (const listed of [await client.contact.feedback.list({}), await client.contact.list({model:'feedback'})]) {
+  assert.equal(listed.data.records.length,1)
+  const record = listed.data.records[0]
+  assert.equal(record.text,iso)
+  assert.deepEqual(record.labels,[iso])
+  assert.deepEqual(record.payload,body.data.payload)
+  assert(record.happenedAt instanceof Date)
+  assert.equal(record.happenedAt.toISOString(),iso)
+}
+assert.equal((await client.contact.feedback.create({data:body.data,idempotencyKey:body.idempotencyKey})).data.id,first.id)
+assert.equal((await client.contact.create(body)).data.id,first.id)
+for (const created of [await client.contact.feedback.create({data:body.data,idempotencyKey:crypto.randomUUID()}), await client.contact.create({...body,idempotencyKey:crypto.randomUUID()})]) {
+  assert.equal(created.error,null)
+  assert.equal(created.data.record.text,iso)
+  assert.deepEqual(created.data.record.payload,body.data.payload)
+  assert(created.data.record.happenedAt instanceof Date)
+}
 database.close()
 `,
     )

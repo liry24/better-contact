@@ -21,10 +21,12 @@ it('validates onUpdate once, including transitions, with no factories for same-s
                     optional: { type: 'string', required: false, validator: { input: z.string().min(2) } },
                     managed: { type: 'number', input: false, defaultValue: 0, onUpdate },
                 },
-                access: {
-                    create: () => true,
-                    transition: ({ changes }) => changes.managed === 7 || Object.keys(changes).length === 0,
-                    update: () => true,
+                operations: {
+                    create: { authorize: () => true },
+                    transition: {
+                        authorize: ({ changes }) => changes.managed === 7 || Object.keys(changes).length === 0,
+                    },
+                    update: { authorize: () => true },
                 },
             },
         },
@@ -54,18 +56,18 @@ it('keeps saved identity on output failures and isolates callback mutation from 
                 idempotency: false as const,
                 fields: { text: { type: 'string', validator: { output: z.never() } } },
                 states: { received: { default: true } },
-                access: {
-                    create: (ctx) => {
-                        ;(ctx.changes as Record<string, unknown>).text = 'spoof'
-                        return true
-                    },
-                },
-                hooks: {
-                    beforeCreate: (ctx) => {
-                        ;(ctx.changes as Record<string, unknown>).state = 'injected'
-                    },
-                    afterCreate: () => {
-                        throw new Error('notification')
+                operations: {
+                    create: {
+                        authorize: (ctx) => {
+                            ;(ctx.changes as Record<string, unknown>).text = 'spoof'
+                            return true
+                        },
+                        before: (ctx) => {
+                            ;(ctx.changes as Record<string, unknown>).state = 'injected'
+                        },
+                        after: () => {
+                            throw new Error('notification')
+                        },
                     },
                 },
             },
@@ -109,7 +111,9 @@ it('rejects non-native validator output and lossy JSON before writing; supports 
                     tags: { type: 'string[]', required: false },
                     kind: { type: ['bug', 'idea'] },
                 },
-                access: { create: () => true },
+                operations: {
+                    create: { authorize: () => true },
+                },
             },
         },
     })
@@ -118,7 +122,17 @@ it('rejects non-native validator output and lossy JSON before writing; supports 
     const base = { value: '3', kind: 'idea' }
     const sparse: unknown[] = []
     sparse.length = 2
-    for (const metadata of [{ a: undefined }, { a: NaN }, { a: new Date() }, sparse, { [Symbol('x')]: 1 }])
+    for (const metadata of [
+        'text',
+        '2026-10-05T01:02:03.123Z',
+        3,
+        true,
+        { a: undefined },
+        { a: NaN },
+        { a: new Date() },
+        sparse,
+        { [Symbol('x')]: 1 },
+    ])
         await expect(send({ ...base, metadata })).rejects.toMatchObject({ body: { code: 'CONTACT_FIELDS' } })
     await expect(send({ ...base, value: 'bad' })).rejects.toMatchObject({ body: { code: 'CONTACT_FIELDS' } })
     await expect(send({ ...base, kind: 'other' })).rejects.toMatchObject({ body: { code: 'CONTACT_FIELDS' } })
@@ -139,7 +153,9 @@ it('runs an application abuse guard on both HTTP and direct calls before persist
                 idempotency: false as const,
                 states: { received: { default: true } },
                 fields: { text: { type: 'string' } },
-                access: { create: () => true },
+                operations: {
+                    create: { authorize: () => true },
+                },
             },
         },
     })

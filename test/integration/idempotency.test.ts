@@ -23,7 +23,9 @@ const base = {
         },
     },
     states: { received: { default: true }, done: {} },
-    access: { create: () => true },
+    operations: {
+        create: { authorize: () => true },
+    },
 }
 it('protects by default without reserving rejected submissions or repeating hooks after output failures', async () => {
     let reject = true
@@ -34,9 +36,12 @@ it('protects by default without reserving rejected submissions or repeating hook
                 ...base,
                 fields: { text: { type: 'string', validator: { output: z.never() } } },
                 states: { received: { default: true, hooks: { afterEnter } } },
-                hooks: {
-                    beforeCreate: () => {
-                        if (reject) throw new Error('veto')
+                operations: {
+                    create: {
+                        ...base.operations.create,
+                        before: () => {
+                            if (reject) throw new Error('veto')
+                        },
                     },
                 },
             },
@@ -85,9 +90,10 @@ it('replays identity only, rechecks policies and never regenerates defaults or r
                         transform: { input: transform, output: (value: unknown) => String(value).slice(0, -1) },
                     },
                 },
-                access: { create: ({ session }) => allowed && !!session },
+                operations: {
+                    create: { authorize: ({ session }) => allowed && !!session, after: notification },
+                },
                 idempotency: { replay: () => replayAllowed },
-                hooks: { afterCreate: notification },
             },
         },
     })
@@ -177,7 +183,16 @@ it('binds keys to model and server-resolved actor, requiring a verified anonymou
 })
 it('uses one insert without transactions and recovers only positively verified lost acknowledgements', async () => {
     const hook = vi.fn<() => void>(),
-        app = await setup({ models: { report: { ...base, hooks: { afterCreate: hook } } } })
+        app = await setup({
+            models: {
+                report: {
+                    ...base,
+                    operations: {
+                        create: { ...base.operations.create, after: hook },
+                    },
+                },
+            },
+        })
     try {
         const user = await app.user(),
             adapter = (await app.auth.$context).adapter,
@@ -226,7 +241,13 @@ it('does not treat unrelated uniqueness errors as success or repeat failed notif
         }),
         app = await setup({
             models: {
-                report: { ...base, fields: { text: { type: 'string', unique: true } }, hooks: { afterCreate: hook } },
+                report: {
+                    ...base,
+                    fields: { text: { type: 'string', unique: true } },
+                    operations: {
+                        create: { ...base.operations.create, after: hook },
+                    },
+                },
             },
         })
     try {
@@ -234,7 +255,7 @@ it('does not treat unrelated uniqueness errors as success or repeat failed notif
             body = { model: 'report' as const, data: { text: 'accepted' }, idempotencyKey: key() }
         const accepted = await app.auth.api.createContact({ headers: user.headers, body })
         if (accepted.replayed) throw new Error('Expected new submission')
-        expect(accepted.hooks).toEqual({ status: 'failed', failed: ['afterCreate'] })
+        expect(accepted.hooks).toEqual({ status: 'failed', failed: ['create.after'] })
         const replay = await app.auth.api.createContact({ headers: user.headers, body })
         expect(replay).not.toHaveProperty('hooks')
         expect(replay).not.toHaveProperty('record')
@@ -258,12 +279,15 @@ it('handles independent connection races and physical deletion ends protection',
         models: {
             report: {
                 ...base,
-                hooks: {
-                    beforeCreate: async () => {
-                        if (++arrivals === 2) release()
-                        await gate
+                operations: {
+                    create: {
+                        ...base.operations.create,
+                        before: async () => {
+                            if (++arrivals === 2) release()
+                            await gate
+                        },
+                        after: hook,
                     },
-                    afterCreate: hook,
                 },
             },
         },

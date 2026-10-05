@@ -2,12 +2,14 @@ import { DatabaseSync } from 'node:sqlite'
 
 import { betterAuth } from 'better-auth'
 import { drizzleAdapter } from 'better-auth/adapters/drizzle'
+import { createAuthClient } from 'better-auth/client'
 import { getMigrations } from 'better-auth/db/migration'
 import { drizzle } from 'drizzle-orm/d1'
 import { Miniflare } from 'miniflare'
 import { expect, it, vi } from 'vite-plus/test'
 import * as z from 'zod'
 
+import { contactClient } from '../../packages/better-contact/src/client'
 import { contact } from '../../packages/better-contact/src/index'
 import * as schema from '../fixtures/d1-schema'
 
@@ -29,6 +31,11 @@ it.each(['native', 'drizzle'] as const)(
             })
             const afterCreate = vi.fn<() => void>()
             const transform = vi.fn<(value: unknown) => string>((value) => `stored:${String(value)}`)
+            const iso = '2026-10-05T01:02:03.123Z'
+            const jsonSchema = z.object({ at: z.string(), nested: z.array(z.string()) })
+            const jsonOutput = vi.fn<(value: unknown) => z.infer<typeof jsonSchema>>((value) =>
+                jsonSchema.parse(typeof value === 'string' ? JSON.parse(value) : value),
+            )
             const plugin = contact({
                 models: {
                     report: {
@@ -42,18 +49,28 @@ it.each(['native', 'drizzle'] as const)(
                             },
                             enabled: { type: 'boolean', defaultValue: true },
                             dueAt: { type: 'date' },
+                            labels: { type: 'string[]' },
+                            payload: {
+                                type: 'json',
+                                validator: { input: jsonSchema, output: jsonSchema },
+                                transform: { output: jsonOutput },
+                            },
                         },
                         states: { received: { default: true }, reviewed: {} },
                         idempotency: { anonymousScope: () => 'server-verified-test-visitor' },
-                        access: { create: () => true, list: () => ({ where: [] }), transition: () => true },
-                        list: { count: true, filters: ['state'] },
-                        hooks: {
-                            beforeCreate: async () => {
-                                if (++arrivals === 2) release()
-                                await gate
+                        operations: {
+                            create: {
+                                authorize: () => true,
+                                before: async () => {
+                                    if (++arrivals === 2) release()
+                                    await gate
+                                },
+                                after: afterCreate,
                             },
-                            afterCreate,
+                            list: { authorize: () => ({ where: [] }) },
+                            transition: { authorize: () => true },
                         },
+                        list: { count: true, filters: ['state'] },
                     },
                 },
             })
@@ -84,7 +101,12 @@ it.each(['native', 'drizzle'] as const)(
                 .mockRejectedValue(new Error('D1 transactions unavailable'))
             const body = {
                 model: 'report' as const,
-                data: { message: ' hello ', dueAt: new Date('2026-01-01') },
+                data: {
+                    message: ' hello ',
+                    dueAt: new Date('2026-01-01'),
+                    labels: [iso],
+                    payload: { at: iso, nested: [iso] },
+                },
                 idempotencyKey: crypto.randomUUID(),
             }
             const raced = await Promise.all([auth.api.createContact({ body }), auth.api.createContact({ body })])
@@ -95,6 +117,29 @@ it.each(['native', 'drizzle'] as const)(
             const accepted = raced.find((result) => !result.replayed)!
             if (accepted.replayed) throw new Error('Expected first submission')
             expect(accepted.record).toMatchObject({ message: 'hello', enabled: true, dueAt: new Date('2026-01-01') })
+            expect(accepted.record?.payload).toEqual(body.data.payload)
+            expect(accepted.record?.labels).toEqual([iso])
+            const beforeRead = jsonOutput.mock.calls.length
+            const stored = await adapter.findOne({
+                model: 'contact_report',
+                where: [{ field: 'id', value: accepted.id }],
+            })
+            expect(stored).toMatchObject({ payload: body.data.payload, labels: [iso] })
+            expect(jsonOutput).toHaveBeenCalledTimes(beforeRead + 1)
+            const client = createAuthClient({
+                baseURL: 'http://localhost:3000',
+                plugins: [contactClient<typeof auth>()],
+                fetchOptions: { customFetchImpl: (input, init) => auth.handler(new Request(input, init)) },
+            })
+            for (const response of [
+                await client.contact.report.list({}),
+                await client.contact.list({ model: 'report' }),
+            ]) {
+                expect(response.error).toBeNull()
+                expect(response.data?.records[0]?.payload).toEqual(body.data.payload)
+                expect(response.data?.records[0]?.labels).toEqual([iso])
+                expect(response.data?.records[0]?.dueAt).toBeInstanceOf(Date)
+            }
             const raw = await database.prepare('SELECT body,submissionToken FROM submissions').first()
             expect(raw).toMatchObject({ body: 'stored:hello', submissionToken: expect.stringMatching(/^v1:/u) })
             const transformed = transform.mock.calls.length
