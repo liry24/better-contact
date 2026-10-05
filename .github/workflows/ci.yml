@@ -35,12 +35,16 @@ jobs:
         permissions: { contents: read }
         strategy:
             fail-fast: false
-            matrix: { os: [ubuntu-latest, windows-latest], version: ['1.7.0', '^1.7.0'] }
+            matrix:
+                os: [ubuntu-latest, windows-latest]
+                node: ['22.18.0', '24.21.0']
+                version: ['1.7.0', '^1.7.0']
         runs-on: ${{ matrix.os }}
         steps:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
               with: { persist-credentials: false }
             - uses: ./.github/actions/setup
+              with: { node-version: '${{ matrix.node }}' }
             - run: bun add --dev --exact "better-auth@${{ matrix.version }}" "@better-auth/core@${{ matrix.version }}" "auth@${{ matrix.version }}"
             - run: vp run typecheck
             - run: vp run test:unit
@@ -52,6 +56,7 @@ jobs:
             fail-fast: false
             matrix:
                 os: [ubuntu-latest, windows-latest]
+                node: ['22.18.0', '24.21.0']
                 manager: [bun, npm, pnpm]
                 version: ['1.7.0', '^1.7.0']
         runs-on: ${{ matrix.os }}
@@ -63,6 +68,7 @@ jobs:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
               with: { persist-credentials: false }
             - uses: ./.github/actions/setup
+              with: { node-version: '${{ matrix.node }}' }
             - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
               with: { name: 'contact-${{ github.sha }}', path: artifact }
             - name: Resolve exact packed artifact
@@ -72,6 +78,28 @@ jobs:
                   [[ ${#files[@]} == 1 && -f "${files[0]}" ]]
                   echo "CONTACT_TARBALL=${files[0]}" >> "$GITHUB_ENV"
             - run: vp run test:consumer
+    runtime:
+        needs: build
+        permissions: { contents: read }
+        strategy:
+            fail-fast: false
+            matrix:
+                os: [ubuntu-latest, windows-latest]
+                node: ['22.0.0', '22.x']
+                version: ['1.7.0', '^1.7.0']
+        runs-on: ${{ matrix.os }}
+        env:
+            CONTACT_BETTER_AUTH_VERSION: ${{ matrix.version }}
+            CONTACT_TARBALL: ${{ github.workspace }}/artifact/better-contact-0.0.0.tgz
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+              with: { persist-credentials: false }
+            # The library floor is tested without Vite+, native TypeScript or node:sqlite.
+            - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+              with: { node-version: '${{ matrix.node }}' }
+            - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+              with: { name: 'contact-${{ github.sha }}', path: artifact }
+            - run: node test/runtime/packed.mjs
     codeql:
         runs-on: ubuntu-latest
         permissions: { contents: read, security-events: write }
@@ -83,7 +111,7 @@ jobs:
             - uses: github/codeql-action/analyze@7999b86c43a865dc79d8923397f35af22de63401
     ci-ok:
         if: always()
-        needs: [quality, build, integration, consumer, codeql]
+        needs: [quality, build, integration, consumer, runtime, codeql]
         runs-on: ubuntu-latest
         steps:
             - name: Require every blocking job to succeed
