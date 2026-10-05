@@ -31,7 +31,11 @@ const auth = betterAuth({
                         },
                     },
                 },
-                inquiry: { states: { new: { default: true }, answered: {} }, fields: { question: { type: 'string' } } },
+                inquiry: {
+                    states: { new: { default: true }, answered: {} },
+                    fields: { question: { type: 'string' } },
+                    idempotency: { replay: () => true },
+                },
             },
         }),
     ],
@@ -49,7 +53,7 @@ async function assertions() {
     const bulk = await client.contact.bulk({ items: [{ operation: 'delete', model: 'inquiry', id: 'x', revision: 0 }] })
     const item = bulk.data?.results[0]
     if (item?.status === 'success' && 'deleted' in item.result) {
-        const status: 'ok' | 'failed' = item.result.hooks.status
+        const status: 'ok' | 'failed' | 'unknown' = item.result.hooks.status
         void status
     }
     const result = await auth.api.createContact({ body: { model: 'feedback', data: { score: '3', label: 'hi' } } })
@@ -66,7 +70,16 @@ async function assertions() {
         void result.record.secret
         void wrong
     }
+    await client.contact.create({ model: 'inquiry', data: { question: 'hello' }, idempotencyKey: crypto.randomUUID() })
+    // @ts-expect-error A keyed model requires its key.
     await client.contact.create({ model: 'inquiry', data: { question: 'hello' } })
+    await client.contact.create({
+        model: 'inquiry',
+        data: { question: 'hello' },
+        idempotencyKey: crypto.randomUUID(),
+        // @ts-expect-error Clients cannot choose an authoritative actor scope.
+        scope: 'someone-else',
+    })
     await client.contact.transition({ model: 'inquiry', id: 'x', revision: 0, state: 'answered' })
     // @ts-expect-error Zod input must be string.
     await auth.api.createContact({ body: { model: 'feedback', data: { score: 3, label: 'hi' } } })

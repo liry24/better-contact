@@ -1,8 +1,11 @@
 /* oxlint-disable no-await-in-loop -- Hook lifecycle order is part of the public contract. */
 import type { DBFieldAttribute } from '@better-auth/core/db'
-import type { DBAdapter, Where } from '@better-auth/core/db/adapter'
+import type { Where } from '@better-auth/core/db/adapter'
 
-import { baseFields, fail, object, prepare, present, storageValue, tableName } from './schema'
+import { listRecords, validateList } from './list'
+import { commitReceipt, digest, lookupReceipt, pack, payload, receiptToken, unpack } from './receipt'
+import type { ContactAdapter, ContactTransaction, Receipt } from './receipt'
+import { baseFields, fail, object, prepare, present, receiptTable, storageValue, tableName } from './schema'
 import type {
     AccessContext,
     ContactModel,
@@ -12,12 +15,11 @@ import type {
     Hook,
     HookContext,
     HookResult,
+    ListQuery,
     Operation,
     Scope,
     StoredRecord,
 } from './types'
-
-type ContactAdapter = Pick<DBAdapter, 'create' | 'findOne' | 'findMany' | 'incrementOne' | 'consumeOne'>
 
 type Actor = { session: ContactSession; headers: Headers }
 type Target = { model: string; id: string; revision?: number }
@@ -129,6 +131,7 @@ function scope(definition: ContactModel, value: unknown): Where[] {
 }
 
 export function createService<M extends ContactModels>(options: ContactOptions<M>) {
+    for (const definition of Object.values(options.models)) validateList(definition)
     const maxBytes = options.limits?.maxBytes ?? 16_384
     const maxPage = options.limits?.maxPage ?? 100
     const maxBulk = options.limits?.maxBulk ?? 50
@@ -164,8 +167,17 @@ export function createService<M extends ContactModels>(options: ContactOptions<M
         }
         return { status: failed.length ? 'failed' : 'ok', failed }
     }
-    async function create(adapter: ContactAdapter, actor: Actor, body: { model: string; data: unknown }) {
+    async function create(
+        adapter: ContactAdapter,
+        actor: Actor,
+        body: { model: string; data: unknown; idempotencyKey?: string },
+    ) {
         const definition = model(body.model)
+        const keyed = definition.idempotency
+        if (!keyed && body.idempotencyKey !== undefined)
+            fail('IDEMPOTENCY_DISABLED', 'Keyed creation is not enabled for this model')
+        const token = keyed ? await receiptToken(adapter, definition, actor, body.model, body.idempotencyKey) : null
+        const existing = token ? await lookupReceipt(adapter, token) : null
         const now = Date.now()
         const window = windows.get(body.model)
         if (!window || now - window.start >= 60_000) windows.set(body.model, { start: now, count: 1 })
@@ -174,11 +186,42 @@ export function createService<M extends ContactModels>(options: ContactOptions<M
                 fail('RATE_LIMIT', 'Contact submission limit reached', 'TOO_MANY_REQUESTS')
             window.count++
         }
-        const data = await prepare(definition.fields, body.data, 'create', false, maxBytes)
+        const defaults = { keys: [] as string[], ...(existing ? { values: payload(existing).data } : {}) }
+        const data = await prepare(definition.fields, body.data, 'create', false, maxBytes, defaults)
+        const fingerprint = token
+            ? await digest(Object.fromEntries(Object.entries(data).filter(([key]) => !defaults.keys.includes(key))))
+            : ''
         const state = Object.entries(definition.states).find(([, value]) => value.default === true)![0]
         const event = context(actor, body.model, 'create', null, data, state)
         await authorize(definition, event)
         await options.guard?.(isolated(event))
+        async function replay(receipt: Receipt) {
+            const saved = payload(receipt)
+            const current = await find(adapter, { model: body.model, id: receipt.resourceId })
+            // Creation permission is re-evaluated with the original accepted defaults, even after a race.
+            await authorize(definition, {
+                ...event,
+                changes: saved.data,
+                targetState: typeof saved.response.record?.state === 'string' ? saved.response.record.state : state,
+            })
+            const permitted: unknown = await keyed!.replay(isolated({ ...event, record: current, changes: saved.data }))
+            if (permitted !== true) fail('NOT_FOUND', 'Contact record unavailable', 'NOT_FOUND')
+            if (receipt.fingerprint !== fingerprint)
+                fail('IDEMPOTENCY_CONFLICT', 'Submission key was used with different content', 'CONFLICT')
+            if (saved.response.record) {
+                for (const key of Object.keys(saved.response.record)) {
+                    if (
+                        key !== 'id' &&
+                        !Object.hasOwn(baseFields, key) &&
+                        (!Object.hasOwn(definition.fields, key) || definition.fields[key]!.returned === false)
+                    )
+                        delete saved.response.record[key]
+                }
+            }
+            // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Internal column is written only with HookResult values.
+            return { ...saved.response, hooks: unpack(receipt.hooks) as HookResult, changed: false, replayed: true }
+        }
+        if (existing) return replay(existing)
         const entering = definition.states[state]!.hooks
         await before(
             [
@@ -187,17 +230,28 @@ export function createService<M extends ContactModels>(options: ContactOptions<M
             ],
             { ...event, previous: null },
         )
-        const record = await adapter.create<StoredRecord>({
-            model: tableName(body.model),
-            data: {
-                ...data,
-                state,
-                userId: actor.session?.user.id ?? null,
-                revision: 0,
-                createdAt: new Date(now),
-                updatedAt: new Date(now),
-            },
-        })
+        let createdRecord: StoredRecord | undefined
+        const persist = async (database: ContactTransaction) => {
+            const record = await database.create<StoredRecord>({
+                model: tableName(body.model),
+                data: {
+                    ...data,
+                    state,
+                    userId: actor.session?.user.id ?? null,
+                    revision: 0,
+                    createdAt: new Date(now),
+                    updatedAt: new Date(now),
+                },
+            })
+            createdRecord = record
+            return result(body.model, definition, record, { status: 'unknown', failed: [] })
+        }
+        const committed = token
+            ? await commitReceipt(adapter, token, fingerprint, keyed!.retentionSeconds ?? 604_800, data, persist)
+            : null
+        if (committed && !committed.created) return replay(committed.receipt)
+        const response = committed ? payload(committed.receipt).response : await persist(adapter)
+        const record = createdRecord!
         const hooks = await after(
             [
                 ['afterCreate', definition.hooks?.afterCreate],
@@ -205,7 +259,18 @@ export function createService<M extends ContactModels>(options: ContactOptions<M
             ],
             { ...event, record, previous: null },
         )
-        return result(body.model, definition, record, hooks)
+        if (committed) {
+            try {
+                await adapter.update({
+                    model: receiptTable,
+                    where: [{ field: 'id', value: committed.receipt.id }],
+                    update: { hooks: pack(hooks) },
+                })
+            } catch {
+                // A saved submission remains accepted; future replay reports unknown hook outcome.
+            }
+        }
+        return { ...response, hooks, replayed: false }
     }
     async function read(adapter: ContactAdapter, actor: Actor, body: Target) {
         const definition = model(body.model)
@@ -213,31 +278,13 @@ export function createService<M extends ContactModels>(options: ContactOptions<M
         await authorize(definition, context(actor, body.model, 'read', record))
         return { model: body.model, record: await present(definition.fields, record) }
     }
-    async function list(
-        adapter: ContactAdapter,
-        actor: Actor,
-        body: { model: string; limit?: number; cursor?: string },
-    ) {
+    async function list(adapter: ContactAdapter, actor: Actor, body: { model: string } & ListQuery) {
         const definition = model(body.model)
         const policy = definition.access?.list
         const allowed = policy ? await policy(isolated(context(actor, body.model, 'list', null))) : false
         if (allowed === false) fail('FORBIDDEN', 'Contact operation denied', 'FORBIDDEN')
         const where = scope(definition, allowed)
-        const limit = body.limit ?? Math.min(20, maxPage)
-        if (!Number.isSafeInteger(limit) || limit < 1 || limit > maxPage) fail('LIMIT', 'Invalid contact page size')
-        if (body.cursor) where.push({ field: 'id', operator: 'gt', value: body.cursor, connector: 'AND' })
-        const rows = await adapter.findMany<StoredRecord>({
-            model: tableName(body.model),
-            where,
-            limit: limit + 1,
-            sortBy: { field: 'id', direction: 'asc' },
-        })
-        const page = rows.slice(0, limit)
-        return {
-            model: body.model,
-            records: await Promise.all(page.map((row) => present(definition.fields, row))),
-            nextCursor: rows.length > limit ? page.at(-1)!.id : null,
-        }
+        return listRecords(adapter, definition, body.model, body, where, maxPage)
     }
     async function mutate(
         adapter: ContactAdapter,

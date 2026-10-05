@@ -12,6 +12,7 @@ import type {
     ContactModels,
     ContactOptions,
     CreateBody,
+    CreateResult,
     DeleteResult,
     ListBody,
     ListResult,
@@ -34,10 +35,12 @@ export type {
     ContactRecord,
     ContactSession,
     CreateBody,
+    CreateResult,
     DeleteResult,
     HookContext,
     HookResult,
     ListBody,
+    ListQuery,
     ListResult,
     MutationResult,
     Operation,
@@ -79,14 +82,16 @@ export function contact<const M extends ContactModels>(options: ContactOptions<M
                 {
                     method: 'POST',
                     metadata: { noStore: true },
-                    body: typed<CreateBody<M>>(z.strictObject({ model: identifier, data: z.unknown() })),
+                    body: typed<CreateBody<M>>(
+                        z.strictObject({ model: identifier, data: z.unknown(), idempotencyKey: z.string().optional() }),
+                    ),
                 },
                 async (ctx) => {
                     const actor = {
                         session: await getAuthoritativeSessionFromCtx(ctx),
                         headers: new Headers(ctx.headers),
                     }
-                    return (await service.create(ctx.context.adapter, actor, ctx.body)) as MutationResult<M>
+                    return (await service.create(ctx.context.adapter, actor, ctx.body)) as CreateResult<M>
                 },
             ),
             readContact: createAuthEndpoint(
@@ -112,8 +117,31 @@ export function contact<const M extends ContactModels>(options: ContactOptions<M
                     body: typed<ListBody<M>>(
                         z.strictObject({
                             model: identifier,
-                            cursor: identifier.optional(),
+                            cursor: z.string().min(1).max(131_072).optional(),
                             limit: z.number().int().positive().optional(),
+                            filters: z
+                                .array(
+                                    z.strictObject({
+                                        field: identifier,
+                                        operator: z.enum(['eq', 'ne', 'in', 'lt', 'lte', 'gt', 'gte']).optional(),
+                                        value: z.union([
+                                            z.string(),
+                                            z.number().finite(),
+                                            z.boolean(),
+                                            z.date(),
+                                            z.null(),
+                                            z.array(z.string()),
+                                            z.array(z.number().finite()),
+                                        ]),
+                                    }),
+                                )
+                                .max(20)
+                                .optional(),
+                            orderBy: z
+                                .strictObject({ field: identifier, direction: z.enum(['asc', 'desc']) })
+                                .optional(),
+                            search: z.strictObject({ field: identifier, term: z.string().min(1).max(200) }).optional(),
+                            count: z.boolean().optional(),
                         }),
                     ),
                 },

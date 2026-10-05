@@ -34,6 +34,28 @@ export type HookContext = AccessContext & { previous: Readonly<StoredRecord> | n
 export type Hook = (context: HookContext) => void | Promise<void>
 export type ContactModel = {
     fields: ContactFields
+    schema?: {
+        modelName?: string
+        fields?: Partial<
+            Record<'state' | 'revision' | 'createdAt' | 'updatedAt', Pick<DBFieldAttribute, 'fieldName'>>
+        > & {
+            userId?: Pick<DBFieldAttribute, 'fieldName' | 'references'>
+        }
+    }
+    list?: {
+        filters?: readonly string[]
+        orderBy?: readonly string[]
+        search?: readonly string[]
+        count?: boolean
+    }
+    idempotency?: {
+        /** Explicit permission to replay a creation receipt; receives the current record. */
+        replay: Policy
+        /** Resolve a verified anonymous identity, never a raw client-selected scope. */
+        anonymousScope?: (context: Pick<AccessContext, 'model' | 'headers'>) => string | null | Promise<string | null>
+        /** Defaults to seven days; at most thirty days. */
+        retentionSeconds?: number
+    }
     states: Record<
         string,
         { default?: boolean; hooks?: { beforeEnter?: Hook; afterEnter?: Hook; beforeLeave?: Hook; afterLeave?: Hook } }
@@ -92,11 +114,16 @@ export type ContactRecord<D extends ContactModel> = {
         | OutputValue<D['fields'][K]>
         | (D['fields'][K] extends { required: false } ? null | undefined : never)
 }
-export type HookResult = { status: 'ok' | 'failed'; failed: string[] }
+export type HookResult = { status: 'ok' | 'failed' | 'unknown'; failed: string[] }
 export type DeleteResult = { deleted: true; hooks: HookResult }
 export type CreateBody<M extends ContactModels> = {
-    [K in keyof M & string]: { model: K; data: ContactInput<M[K]['fields']> }
+    [K in keyof M & string]: { model: K; data: ContactInput<M[K]['fields']> } & (M[K] extends {
+        idempotency: object
+    }
+        ? { idempotencyKey: string }
+        : { idempotencyKey?: never })
 }[keyof M & string]
+export type CreateResult<M extends ContactModels> = MutationResult<M> & { replayed: boolean }
 export type TargetBody<M extends ContactModels> = { model: keyof M & string; id: string }
 export type UpdateBody<M extends ContactModels> = {
     [K in keyof M & string]: { model: K; id: string; revision: number; data: Partial<ContactInput<M[K]['fields']>> }
@@ -115,12 +142,20 @@ export type MutationResult<M extends ContactModels> = {
         changed: boolean
     }
 }[keyof M & string]
-export type ListBody<M extends ContactModels> = { model: keyof M & string; cursor?: string; limit?: number }
+export type ListQuery = {
+    cursor?: string
+    limit?: number
+    filters?: ScopeTerm[]
+    orderBy?: { field: string; direction: 'asc' | 'desc' }
+    search?: { field: string; term: string }
+    count?: boolean
+}
+export type ListBody<M extends ContactModels> = ListQuery & { model: keyof M & string }
 export type ReadResult<M extends ContactModels> = {
     [K in keyof M & string]: { model: K; record: ContactRecord<M[K]> }
 }[keyof M & string]
 export type ListResult<M extends ContactModels> = {
-    [K in keyof M & string]: { model: K; records: ContactRecord<M[K]>[]; nextCursor: string | null }
+    [K in keyof M & string]: { model: K; records: ContactRecord<M[K]>[]; nextCursor: string | null; count?: number }
 }[keyof M & string]
 export type BulkBody<M extends ContactModels> = {
     items: (

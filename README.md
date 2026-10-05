@@ -69,15 +69,83 @@ For a report, require `session` in `create` and verify the submitted target agai
 list: ({ session }) => (session ? { where: [{ field: 'userId', value: session.user.id }] } : false)
 ```
 
-List permission grants access to every matching row; it does not call `read` for each result. Keep these policies consistent. Scopes accept up to 20 AND conditions on untransformed scalar columns, with `eq`, `ne`, `in`, `lt`, `lte`, `gt`, `gte`. Unsupported scopes are rejected. Filtering happens in the database before pagination; no totals or unscoped counts are returned. Pages sort by unique ID, using the last ID as `nextCursor`. This is a live traversal, not a snapshot: concurrent inserts whose IDs sort before the cursor appear on a fresh traversal.
+List permission grants access to every matching row; it does not call `read` for each result. Keep these policies consistent. Scopes accept up to 20 AND conditions on untransformed scalar columns, with `eq`, `ne`, `in`, `lt`, `lte`, `gt`, `gte`. Unsupported scopes are rejected. Filtering happens in the database before pagination.
+
+Enable public query capabilities per model:
+
+```ts
+list: {
+  filters: ['state', 'userId'],
+  orderBy: ['createdAt', 'priority'],
+  search: ['message'],
+  count: true,
+}
+```
+
+```ts
+await client.contact.list({
+  model: 'feedback',
+  filters: [{ field: 'state', value: 'received' }],
+  orderBy: { field: 'createdAt', direction: 'desc' },
+  search: { field: 'message', term: 'keyboard' },
+  count: true,
+  limit: 20,
+})
+```
+
+Client filters and one text search are always ANDed with the current policy scope. `count` covers that same filtered scope, independent of the page cursor. Hidden, transformed and non-scalar fields cannot be queried; ordering additionally requires a non-null string, number or date column. Search uses the adapter's `contains` operator on one enabled string column, with its native case/collation behavior. `%`, `_` and backslash patterns are rejected. Unsupported adapter operations fail; there is no in-memory search or authorization fallback.
+
+Pages default to ID ascending. Other orders use ID in the same direction to break ties. Pass the opaque `nextCursor` unchanged with the same filters, sort and current permission scope. The adapter supports one sort column, so secondary ordering queries disjoint equal-value groups, always retaining every scope predicate. This may make multiple database queries per page. Pages and optional counts are live reads, not a snapshot: concurrent edits/inserts can move records across the cursor. Related-resource hydration remains application-owned.
+
+## Safe creation retries
+
+Enable receipts on a model with `idempotency: { replay: ({ session, record }) => !!session && record?.userId === session.user.id }`. That model then requires `idempotencyKey` on every create call. Generate a random key once per submission and reuse it after a lost response:
+
+```ts
+const submission = {
+  model: 'report' as const,
+  idempotencyKey: crypto.randomUUID(),
+  data: { targetId: 'public-resource', reason: 'incorrect information' },
+}
+await client.contact.create(submission)
+```
+
+Keys accept 16–128 ASCII letters, digits, hyphens or underscores. They are scoped to the model and server-resolved user ID. Anonymous keyed creation requires `idempotency.anonymousScope({ model, headers })` to return an application-verified, stable identity (for example, a verified signed visitor cookie); returning null denies creation. Never derive it from an unverified client-supplied identity. No body parameter can select the actor scope.
+
+The native contact row and an internal `contact__receipt` row commit in one **real adapter transaction**. The receipt's unique hashed token resolves races; its encoded snapshot preserves the original accepted response without replacing native model columns. Adapters must explicitly advertise an enabled transaction implementation. A silently sequential `transaction()` fallback is rejected before writing. **The current native D1 adapter is unsupported for keyed creation.** There is no custom persistence callback or public prepare/commit API. Wrapping `createContact` with a separate idempotency write cannot make them atomic.
+
+Replays validate the submitted fields, recheck `access.create`, run the guard, and require the explicit `idempotency.replay` policy against the current record. They return the original creation snapshot with `replayed: true` and `changed: false`, never later management changes. Currently hidden/removed fields are stripped. The replay policy must authorize returning historical submitted values (`changes` contains the original normalized data); deny old receipts if application privacy/presentation rules change. Serializers are not reapplied to already-presented snapshots. This grants no ordinary read/list permission. Deletion or revoked replay permission makes the receipt unavailable without creating a replacement. Same key with different normalized submitted content returns `CONTACT_IDEMPOTENCY_CONFLICT`; new keys can intentionally submit identical content. Input validators must normalize deterministically. Native generated defaults are preserved for replay and excluded from the content fingerprint; adapter transforms are not reapplied to the snapshot.
+
+Receipts expire after seven days (`retentionSeconds`, 60 seconds through thirty days). After expiry the key may create a new record. Expired rows are replaced lazily on key reuse; schedule application database maintenance to purge expired `contact__receipt` rows if needed. Receipt snapshots contain submission data and need the same storage access controls and retention review as contact rows.
+
+After hooks execute only for the request that knows it committed. Replays never repeat them. A crash or ambiguous commit acknowledgement can leave `hooks.status: 'unknown'`; it still identifies an accepted submission, not permission to retry notification delivery. Receipt outcome-update failures also leave this status. Use a separate durable application delivery mechanism when notification delivery must survive crashes.
+
+## Native storage mapping
+
+Each model can configure `schema.modelName` and `schema.fields` for base-column aliases; application fields already accept native `fieldName`:
+
+```ts
+schema: {
+  modelName: 'moderation_reports',
+  fields: {
+    userId: {
+      fieldName: 'author_id',
+      references: { model: 'user', field: 'id', onDelete: 'set null' },
+    },
+    createdAt: { fieldName: 'submitted_at' },
+  },
+}
+```
+
+`userId` remains server-controlled and nullable. By default it has no foreign key. Opt into a native `user.id` reference with `set null`, `cascade`, `restrict` or `no action`; omitted `onDelete` follows Better Auth's cascade default. Other base-column types, defaults and input rules cannot be overridden. Aliases must be safe and distinct. Generate and apply migrations before use, checking for collisions with other plugins and existing tables. Existing tables need the declared application columns and `id`, state, revision and timestamp columns (or their aliases). String record IDs are verified; numeric-ID migration compatibility is not claimed.
 
 ## Operations and state hooks
 
 | Client               | Server API          | Input                                                  |
 | -------------------- | ------------------- | ------------------------------------------------------ |
-| `contact.create`     | `createContact`     | `{ model, data }`                                      |
+| `contact.create`     | `createContact`     | `{ model, data, idempotencyKey? }`                     |
 | `contact.read`       | `readContact`       | `{ model, id }`                                        |
-| `contact.list`       | `listContacts`      | `{ model, limit?, cursor? }`                           |
+| `contact.list`       | `listContacts`      | `{ model, limit?, cursor?, filters?, orderBy?, search?, count? }` |
 | `contact.update`     | `updateContact`     | `{ model, id, revision, data }`                        |
 | `contact.transition` | `transitionContact` | `{ model, id, revision, state }`                       |
 | `contact.delete`     | `deleteContact`     | `{ model, id, revision }`                              |
@@ -91,7 +159,7 @@ Creation runs model `beforeCreate`, initial-state `beforeEnter`, persistence, mo
 
 Mutations require the last read revision and use the adapter's atomic guarded operations. A concurrent write returns `CONTACT_CONFLICT`; reload before retrying. Bulk actions are sequential, bounded (50 by default, maximum 100), and return an ordered result for every item. They are not a transaction and may partially succeed. Duplicate items are not silently deduplicated.
 
-Accepted mutations return `{ model, id, revision, record, changed, hooks, output }`. After-hook failures return `hooks: { status: 'failed', failed: [...] }`; other after hooks still run. `onHookError` can capture details. A failed output validator returns `output: 'failed'` and `record: null`, retaining the saved identity/revision. Neither failure should trigger resubmission. Hooks are best-effort within the request, not a durable delivery queue. Use an application outbox if delivery must survive process crashes. Adapter/database failures can still have an ambiguous outcome; this plugin does not promise submission idempotency.
+Accepted mutations return `{ model, id, revision, record, changed, hooks, output }`; creation also returns `replayed`. After-hook failures return `hooks: { status: 'failed', failed: [...] }`; other after hooks still run. `onHookError` can capture details. A failed output validator returns `output: 'failed'` and `record: null`, retaining the saved identity/revision. Neither failure should trigger resubmission. Hooks are best-effort within the request, not a durable delivery queue. Models without idempotency receipts can still have ambiguous database outcomes.
 
 `auth.api.maintainContact` is an explicit **server-only** maintenance API for update, transition and delete. It bypasses access policies and permits `input: false` fields, while preserving field/state validation, revision checks and hooks. It has no HTTP path or client action. Do not wrap it in an unprotected route. Ordinary `auth.api` operations never bypass policies.
 

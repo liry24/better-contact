@@ -23,10 +23,25 @@ const reserved = new Set(
     ['id', ...Object.keys(baseFields), '__proto__', 'constructor', 'prototype'].map((key) => key.toLowerCase()),
 )
 export const tableName = (model: string) => `contact_${model}`
+// The double underscore cannot collide with a configured model (which starts with a letter).
+export const receiptTable = 'contact__receipt'
 const normalized = (name: string) => name.replace(/([a-z0-9])([A-Z])/gu, '$1_$2').toLowerCase()
+export function modelFields(definition: ContactModels[string]): ContactFields {
+    return Object.fromEntries(
+        Object.entries(baseFields).map(([key, value]) => [
+            key,
+            {
+                ...value,
+                // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Keys come from the closed baseFields object above.
+                ...definition.schema?.fields?.[key as keyof typeof baseFields],
+            },
+        ]),
+    )
+}
 
 export function buildSchema(models: ContactModels) {
     const schema: NonNullable<BetterAuthPlugin['schema']> = {}
+    const tables = new Set(['user', 'session', 'account', 'verification', normalized(receiptTable)])
     if (!Object.keys(models).length) throw new Error('Contact requires at least one model')
     for (const [model, definition] of Object.entries(models)) {
         if (!/^[a-z][a-z0-9_]{0,39}$/u.test(model) || reserved.has(model))
@@ -37,9 +52,37 @@ export function buildSchema(models: ContactModels) {
         for (const [key] of states)
             if (!/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/u.test(key) || reserved.has(key.toLowerCase()))
                 throw new Error(`Unsafe contact state: ${key}`)
-        const physical = new Set(reserved)
+        const modelName = definition.schema?.modelName ?? tableName(model)
+        if (!/^[a-zA-Z][a-zA-Z0-9_]{0,47}$/u.test(modelName) || tables.has(normalized(modelName)))
+            throw new Error(`Unsafe or colliding contact table: ${modelName}`)
+        tables.add(normalized(modelName))
+        for (const [key, override] of Object.entries(definition.schema?.fields ?? {})) {
+            if (
+                !Object.hasOwn(baseFields, key) ||
+                Object.keys(override).some(
+                    (attr) => attr !== 'fieldName' && !(key === 'userId' && attr === 'references'),
+                )
+            )
+                throw new Error(`Unsupported contact base field override: ${key}`)
+        }
+        const reference = definition.schema?.fields?.userId?.references
+        if (
+            reference &&
+            (reference.model !== 'user' ||
+                reference.field !== 'id' ||
+                !['set null', 'cascade', 'restrict', 'no action'].includes(reference.onDelete ?? 'cascade'))
+        )
+            throw new Error('Contact userId must reference user.id with a supported deletion action')
+        const core = modelFields(definition)
+        const columns = Object.values(core).map((field) => field.fieldName)
+        if (columns.some((column) => column !== undefined && !/^[a-zA-Z][a-zA-Z0-9_]{0,47}$/u.test(column)))
+            throw new Error('Unsafe contact base field mapping')
+        const coreColumns = ['id', ...Object.entries(core).map(([key, field]) => field.fieldName ?? key)]
+        if (new Set(coreColumns.map(normalized)).size !== coreColumns.length)
+            throw new Error('Colliding contact base field mappings')
+        const physical = new Set([...reserved, ...coreColumns.map((column) => column.toLowerCase())])
         const logical = new Set(reserved)
-        const generatedColumns = new Set(['id', ...Object.keys(baseFields)].map(normalized))
+        const generatedColumns = new Set(coreColumns.map(normalized))
         for (const [key, field] of Object.entries(definition.fields)) {
             const column = field.fieldName ?? key
             if (
@@ -63,7 +106,25 @@ export function buildSchema(models: ContactModels) {
             if (field.input === false && field.required !== false && field.defaultValue === undefined)
                 throw new Error(`Required managed contact field needs a default: ${key}`)
         }
-        schema[tableName(model)] = { modelName: tableName(model), fields: { ...baseFields, ...definition.fields } }
+        schema[tableName(model)] = { modelName, fields: { ...core, ...definition.fields } }
+        if (definition.idempotency) {
+            const retention = definition.idempotency.retentionSeconds ?? 604_800
+            if (!Number.isSafeInteger(retention) || retention < 60 || retention > 2_592_000)
+                throw new Error('Contact receipt retention must be between 60 seconds and thirty days')
+            if (typeof definition.idempotency.replay !== 'function')
+                throw new Error('Contact idempotency requires an explicit replay policy')
+            schema[receiptTable] = {
+                modelName: receiptTable,
+                fields: {
+                    token: { type: 'string', unique: true, input: false },
+                    fingerprint: { type: 'string', input: false },
+                    resourceId: { type: 'string', input: false },
+                    expiresAt: { type: 'date', input: false, index: true },
+                    payload: { type: 'string', input: false },
+                    hooks: { type: 'string', input: false },
+                },
+            }
+        }
     }
     return schema
 }
@@ -136,6 +197,7 @@ export async function prepare(
     mode: 'create' | 'update',
     managed: boolean,
     maxBytes: number,
+    defaults?: { keys: string[]; values?: Record<string, unknown> },
 ) {
     if (!object(input) || Reflect.ownKeys(input).length !== Object.keys(input).length)
         fail('FIELDS', 'Expected contact fields')
@@ -155,7 +217,13 @@ export async function prepare(
             mode === 'create' &&
             field.defaultValue !== undefined
         ) {
-            value = typeof field.defaultValue === 'function' ? field.defaultValue() : field.defaultValue
+            value =
+                defaults?.values && Object.hasOwn(defaults.values, key)
+                    ? defaults.values[key]
+                    : typeof field.defaultValue === 'function'
+                      ? field.defaultValue()
+                      : field.defaultValue
+            defaults?.keys.push(key)
             generated = true
         } else if (value === undefined && mode === 'update' && field.onUpdate) {
             value = field.onUpdate()
