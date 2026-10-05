@@ -25,7 +25,7 @@ export const auth = betterAuth({
           access: { create: () => true },
           hooks: {
             afterCreate: async ({ record }) => {
-              // Notify staff here, optionally through better-notif.
+              // Notify staff through your application's delivery service.
               // Persisted success is preserved if this hook fails.
             },
           },
