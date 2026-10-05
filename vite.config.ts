@@ -9,7 +9,7 @@ export default defineConfig({
         trailingComma: 'all',
         sortImports: true,
         sortPackageJson: true,
-        ignorePatterns: ['**/dist/**', '**/node_modules/**', '**/.contract-*/**', 'test/generated/**'],
+        ignorePatterns: ['**/*.md', '**/dist/**', '**/node_modules/**', '**/.contract-*/**', 'test/generated/**'],
     },
     lint: {
         categories: { correctness: 'error', perf: 'warn', suspicious: 'error' },

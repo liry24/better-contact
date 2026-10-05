@@ -12,27 +12,26 @@ import { contact } from 'better-contact'
 import { z } from 'zod'
 
 export const auth = betterAuth({
-    // database: your database or adapter
-    plugins: [
-        contact({
-            models: {
-                feedback: {
-                    fields: {
-                        message: { type: 'string', validator: { input: z.string().trim().min(1).max(2000) } },
-                        priority: { type: 'number', input: false, defaultValue: 0 },
-                    },
-                    states: { received: { default: true }, reviewed: {} },
-                    access: { create: () => true },
-                    hooks: {
-                        afterCreate: async ({ record }) => {
-                            // Notify staff here, optionally through better-notif.
-                            // Persisted success is preserved if this hook fails.
-                        },
-                    },
-                },
+  plugins: [
+    contact({
+      models: {
+        feedback: {
+          fields: {
+            message: { type: 'string', validator: { input: z.string().trim().min(1).max(2000) } },
+            priority: { type: 'number', input: false, defaultValue: 0 },
+          },
+          states: { received: { default: true }, reviewed: {} },
+          access: { create: () => true },
+          hooks: {
+            afterCreate: async ({ record }) => {
+              // Notify staff here, optionally through better-notif.
+              // Persisted success is preserved if this hook fails.
             },
-        }),
-    ],
+          },
+        },
+      },
+    }),
+  ],
 })
 ```
 
@@ -51,8 +50,8 @@ import type { auth } from './auth'
 
 const client = createAuthClient({ plugins: [contactClient<typeof auth>()] })
 const { data, error } = await client.contact.create({
-    model: 'feedback',
-    data: { message: 'Please add keyboard shortcuts' },
+  model: 'feedback',
+  data: { message: 'Please add keyboard shortcuts' },
 })
 ```
 
