@@ -1,12 +1,14 @@
 # Repository guide
 
-- Use Vite+ exactly 1.0.0 with pinned Bun and bun.lock; run `vp run check`.
-- Use native Better Auth fields/schema/adapter and the `auth` CLI. Do not convert validators into schemas.
-- Authorization is per model/operation and denies by default. HTTP and auth.api share the same service.
-- List authorization is a declarative AND scope executed by the database. Never filter a page after pagination.
-- Revision-conditional writes detect races. State has no built-in meaning; no-op transitions never replay hooks.
-- After-hook failures are separate from persisted success. Never throw a notification failure as a failed submission.
-- Real SQLite and packed-tarball consumer tests are required. Only SQLite/Better Auth 1.7.x are currently verified.
-- Keep client runtime imports separate from server code; server inference uses type-only imports.
-- Release preparation uses SHA-pinned uppt and feat! commits for the future 0.1.0. Publishing needs explicit approval.
-- Preserve CI's SHA pins, minimal permissions and a ci-ok job requiring every blocking job to succeed.
+- Read toolchain, package-manager pins and scripts from [package.json](package.json), and compatibility ranges from the [package manifest](packages/better-contact/package.json). Keep `bun.lock` synchronized.
+- Run `vp run check` before pushing. Preserve [CI](.github/workflows/ci.yml)'s SHA pins, minimal permissions and `ci-ok` requirement that every blocking job succeeds.
+- Markdown stays outside `vp fmt`. Maintain code snippets manually with two-space indentation.
+- Use native Better Auth fields, plugin schema, adapters and the `auth` CLI; do not convert validators into schemas. Validate Standard Schema inputs in the shared service before writes, applying defaults and transforms only once.
+- Deny access by default per model and operation. HTTP and ordinary `auth.api` calls share policies and server-resolved sessions; trusted maintenance stays explicitly server-only.
+- Apply declarative scopes in the database before pagination or counting. Never authorize by filtering a fetched page.
+- Use atomic revision-conditional writes. State meanings belong to the application; reject unknown states and skip hooks for no-op transitions.
+- Run side-effect hooks after persistence. Report hook failures separately from accepted writes to avoid duplicate resubmission.
+- Keep client runtime imports separate from server code; use type-only server inference. Respect managed-field input restrictions and output visibility.
+- Preserve real database, generated-schema and inference tests. Claim adapter compatibility only when backed by integration tests.
+- Test the same packed artifact across package managers with isolated temporary caches and installed-content verification. Never rebuild or modify a supplied release tarball.
+- Follow the current [release workflow](.github/workflows/release.yml). Publishing, tags, releases and deployment require explicit authorization.
