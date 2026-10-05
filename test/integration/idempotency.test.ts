@@ -23,8 +23,8 @@ const base = {
         },
     },
     states: { received: { default: true }, done: {} },
-    operations: {
-        create: { authorize: () => true },
+    access: {
+        create: () => true,
     },
 }
 it('protects by default without reserving rejected submissions or repeating hooks after output failures', async () => {
@@ -36,9 +36,11 @@ it('protects by default without reserving rejected submissions or repeating hook
                 ...base,
                 fields: { text: { type: 'string', validator: { output: z.never() } } },
                 states: { received: { default: true, hooks: { afterEnter } } },
-                operations: {
+                access: {
+                    create: base.access.create,
+                },
+                hooks: {
                     create: {
-                        ...base.operations.create,
                         before: () => {
                             if (reject) throw new Error('veto')
                         },
@@ -90,8 +92,11 @@ it('replays identity only, rechecks policies and never regenerates defaults or r
                         transform: { input: transform, output: (value: unknown) => String(value).slice(0, -1) },
                     },
                 },
-                operations: {
-                    create: { authorize: ({ session }) => allowed && !!session, after: notification },
+                access: {
+                    create: ({ session }) => allowed && !!session,
+                },
+                hooks: {
+                    create: { after: notification },
                 },
                 idempotency: { replay: () => replayAllowed },
             },
@@ -187,8 +192,11 @@ it('uses one insert without transactions and recovers only positively verified l
             models: {
                 report: {
                     ...base,
-                    operations: {
-                        create: { ...base.operations.create, after: hook },
+                    access: {
+                        create: base.access.create,
+                    },
+                    hooks: {
+                        create: { after: hook },
                     },
                 },
             },
@@ -244,8 +252,11 @@ it('does not treat unrelated uniqueness errors as success or repeat failed notif
                 report: {
                     ...base,
                     fields: { text: { type: 'string', unique: true } },
-                    operations: {
-                        create: { ...base.operations.create, after: hook },
+                    access: {
+                        create: base.access.create,
+                    },
+                    hooks: {
+                        create: { after: hook },
                     },
                 },
             },
@@ -279,9 +290,11 @@ it('handles independent connection races and physical deletion ends protection',
         models: {
             report: {
                 ...base,
-                operations: {
+                access: {
+                    create: base.access.create,
+                },
+                hooks: {
                     create: {
-                        ...base.operations.create,
                         before: async () => {
                             if (++arrivals === 2) release()
                             await gate

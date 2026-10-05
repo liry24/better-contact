@@ -49,9 +49,13 @@ export async function verifyTransport(database: NonNullable<BetterAuthOptions['d
                             hidden: { type: 'string', input: false, returned: false, defaultValue: 'private' },
                         },
                         states: { received: { default: true } },
-                        operations: {
+                        access: {
+                            create: () => true,
+                            read: () => true,
+                            list: () => ({ where: [] }),
+                        },
+                        hooks: {
                             create: {
-                                authorize: () => true,
                                 after: ({ changes, record }) => {
                                     assert(record)
                                     assert(record.encodedDate instanceof Date)
@@ -59,8 +63,6 @@ export async function verifyTransport(database: NonNullable<BetterAuthOptions['d
                                     seen.push({ change: changes.score, encoded: record.encoded, hidden: record.hidden })
                                 },
                             },
-                            read: { authorize: () => true },
-                            list: { authorize: () => ({ where: [] }) },
                         },
                     },
                 },

@@ -43,10 +43,10 @@ it('persists real native columns and async validators, defaults, mappings and tr
                     schemaDefault: { type: 'string', validator: { input: z.string().default('schema') } },
                     date: { type: 'date', required: false },
                 },
-                operations: {
-                    create: { authorize: allow },
-                    read: { authorize: allow },
-                    update: { authorize: allow },
+                access: {
+                    create: allow,
+                    read: allow,
+                    update: allow,
                 },
             },
         },
@@ -132,23 +132,20 @@ it('uses authoritative sessions and per-operation policies for HTTP and direct A
                 idempotency: false as const,
                 states,
                 fields: { text: { type: 'string' } },
-                operations: {
-                    create: { authorize: allow },
+                access: {
+                    create: allow,
                 },
             },
             report: {
                 idempotency: false as const,
                 states,
                 fields: { targetId: { type: 'string' }, reason: { type: 'string' } },
-                operations: {
-                    create: {
-                        authorize: ({ session, changes }) =>
-                            !!session && targets.get(String(changes.targetId)) === 'owner-1',
-                    },
-                    read: { authorize: isStaff },
-                    list: { authorize: (ctx) => (isStaff(ctx) ? { where: [] } : false) },
-                    update: { authorize: isStaff },
-                    transition: { authorize: () => false },
+                access: {
+                    create: ({ session, changes }) => !!session && targets.get(String(changes.targetId)) === 'owner-1',
+                    read: isStaff,
+                    list: (ctx) => (isStaff(ctx) ? { where: [] } : false),
+                    update: isStaff,
+                    transition: () => false,
                 },
             },
         },
@@ -245,14 +242,14 @@ it('orders custom state hooks, rejects before persistence, skips no-ops and repo
                         },
                     },
                 },
-                operations: {
-                    create: { authorize: allow, before: hook('create-before'), after: hook('create-after') },
-                    transition: {
-                        authorize: allow,
-                        before: hook('transition-before'),
-                        after: hook('transition-after'),
-                    },
-                    read: { authorize: allow },
+                access: {
+                    create: allow,
+                    transition: allow,
+                    read: allow,
+                },
+                hooks: {
+                    create: { before: hook('create-before'), after: hook('create-after') },
+                    transition: { before: hook('transition-before'), after: hook('transition-after') },
                 },
             },
         },
@@ -308,10 +305,12 @@ it('CAS makes concurrent transitions have exactly one winner and one after hook'
                 idempotency: false as const,
                 states,
                 fields: { text: { type: 'string' } },
-                operations: {
-                    create: { authorize: allow },
+                access: {
+                    create: allow,
+                    transition: allow,
+                },
+                hooks: {
                     transition: {
-                        authorize: allow,
                         before: async () => {
                             entered++
                             if (entered === 2) release()
@@ -344,16 +343,14 @@ it('scopes before pagination, isolates owners and rejects unsupported scopes and
                 idempotency: false as const,
                 states,
                 fields: { score: { type: 'number', validator: { input: z.number().int().min(1).max(5) } } },
-                operations: {
-                    create: { authorize: ({ session }) => !!session },
-                    list: {
-                        authorize: ({ session }) =>
-                            unsafe
-                                ? ({ where: [{ field: 'userId', value: session!.user.id, connector: 'OR' }] } as any)
-                                : session
-                                  ? { where: [{ field: 'userId', value: session.user.id }] }
-                                  : false,
-                    },
+                access: {
+                    create: ({ session }) => !!session,
+                    list: ({ session }) =>
+                        unsafe
+                            ? ({ where: [{ field: 'userId', value: session!.user.id, connector: 'OR' }] } as any)
+                            : session
+                              ? { where: [{ field: 'userId', value: session.user.id }] }
+                              : false,
                 },
             },
         },
@@ -423,9 +420,11 @@ it('guards size/rate, validates defaults/async output and preserves accepted sub
                         },
                     },
                 },
-                operations: {
+                access: {
+                    create: allow,
+                },
+                hooks: {
                     create: {
-                        authorize: allow,
                         after: () => {
                             throw new Error('private notification error')
                         },
@@ -456,11 +455,11 @@ it('bulk returns honest ordered partial results and management never bypasses va
             idempotency: false as const,
             states,
             fields: { text: { type: 'string' } },
-            operations: {
-                create: { authorize: allow },
-                update: { authorize: allow },
-                delete: { authorize: allow },
-                transition: { authorize: allow },
+            access: {
+                create: allow,
+                update: allow,
+                delete: allow,
+                transition: allow,
             },
         },
     } satisfies ContactModels

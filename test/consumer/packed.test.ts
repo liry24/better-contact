@@ -165,10 +165,10 @@ import * as z from 'zod'
 import * as v from 'valibot'
 const database = new DatabaseSync(':memory:')
 export const auth = betterAuth({ database, baseURL: 'http://localhost:3000', secret: 'packed-contact-secret-more-than-thirty-two-characters', plugins: [contact({models: {
-  feedback: { fields: {score: {type:'number', validator:{input:z.string().transform(Number)}}, label:{type:'string',validator:{input:v.pipe(v.string(),v.trim())}}, priority:{type:'number',input:false,defaultValue:0}}, states: {received:{default:true},reviewed:{}}, list:{filters:['state'],orderBy:['createdAt'],search:['label'],count:true}, idempotency:{replay:()=>true,anonymousScope:()=> 'server-verified-test-visitor'}, operations: {
-create: { authorize: ()=>true },
-list: { authorize: ()=>({where:[]}) },
-transition: { authorize: ()=>true }
+  feedback: { fields: {score: {type:'number', validator:{input:z.string().transform(Number)}}, label:{type:'string',validator:{input:v.pipe(v.string(),v.trim())}}, priority:{type:'number',input:false,defaultValue:0}}, states: {received:{default:true},reviewed:{}}, list:{filters:['state'],orderBy:['createdAt'],search:['label'],count:true}, idempotency:{replay:()=>true,anonymousScope:()=> 'server-verified-test-visitor'}, access: {
+create: ()=>true,
+list: ()=>({where:[]}),
+transition: ()=>true
 } },
 }})], logger:{disabled:true} })
 await (await getMigrations(auth.options)).runMigrations()

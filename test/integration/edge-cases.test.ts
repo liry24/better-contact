@@ -21,12 +21,10 @@ it('validates onUpdate once, including transitions, with no factories for same-s
                     optional: { type: 'string', required: false, validator: { input: z.string().min(2) } },
                     managed: { type: 'number', input: false, defaultValue: 0, onUpdate },
                 },
-                operations: {
-                    create: { authorize: () => true },
-                    transition: {
-                        authorize: ({ changes }) => changes.managed === 7 || Object.keys(changes).length === 0,
-                    },
-                    update: { authorize: () => true },
+                access: {
+                    create: () => true,
+                    transition: ({ changes }) => changes.managed === 7 || Object.keys(changes).length === 0,
+                    update: () => true,
                 },
             },
         },
@@ -56,12 +54,14 @@ it('keeps saved identity on output failures and isolates callback mutation from 
                 idempotency: false as const,
                 fields: { text: { type: 'string', validator: { output: z.never() } } },
                 states: { received: { default: true } },
-                operations: {
+                access: {
+                    create: (ctx) => {
+                        ;(ctx.changes as Record<string, unknown>).text = 'spoof'
+                        return true
+                    },
+                },
+                hooks: {
                     create: {
-                        authorize: (ctx) => {
-                            ;(ctx.changes as Record<string, unknown>).text = 'spoof'
-                            return true
-                        },
                         before: (ctx) => {
                             ;(ctx.changes as Record<string, unknown>).state = 'injected'
                         },
@@ -111,8 +111,8 @@ it('rejects non-native validator output and lossy JSON before writing; supports 
                     tags: { type: 'string[]', required: false },
                     kind: { type: ['bug', 'idea'] },
                 },
-                operations: {
-                    create: { authorize: () => true },
+                access: {
+                    create: () => true,
                 },
             },
         },
@@ -153,8 +153,8 @@ it('runs an application abuse guard on both HTTP and direct calls before persist
                 idempotency: false as const,
                 states: { received: { default: true } },
                 fields: { text: { type: 'string' } },
-                operations: {
-                    create: { authorize: () => true },
+                access: {
+                    create: () => true,
                 },
             },
         },

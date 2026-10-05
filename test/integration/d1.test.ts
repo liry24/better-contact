@@ -58,17 +58,19 @@ it.each(['native', 'drizzle'] as const)(
                         },
                         states: { received: { default: true }, reviewed: {} },
                         idempotency: { anonymousScope: () => 'server-verified-test-visitor' },
-                        operations: {
+                        access: {
+                            create: () => true,
+                            list: () => ({ where: [] }),
+                            transition: () => true,
+                        },
+                        hooks: {
                             create: {
-                                authorize: () => true,
                                 before: async () => {
                                     if (++arrivals === 2) release()
                                     await gate
                                 },
                                 after: afterCreate,
                             },
-                            list: { authorize: () => ({ where: [] }) },
-                            transition: { authorize: () => true },
                         },
                         list: { count: true, filters: ['state'] },
                     },

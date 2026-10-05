@@ -89,11 +89,11 @@ import * as z from 'zod'
 import * as v from 'valibot'
 const database = new Database(':memory:')
 const auth = betterAuth({database, baseURL:'http://localhost:3000',secret:'runtime-contact-secret-more-than-thirty-two-characters',logger:{disabled:true},plugins:[contact({models:{
-  feedback:{idempotency:{anonymousScope:()=> 'server-verified-runtime-visitor'},fields:{score:{type:'number',validator:{input:z.string().transform(Number)}},label:{type:'string',validator:{input:v.pipe(v.string(),v.trim())}},priority:{type:'number',input:false,defaultValue:0},text:{type:'string'},labels:{type:'string[]'},payload:{type:'json'},happenedAt:{type:'date'}},states:{received:{default:true},reviewed:{}},operations: {
-create: { authorize: ()=>true },
-update: { authorize: ()=>true },
-transition: { authorize: ()=>true },
-list: { authorize: ()=>({where:[]}) }
+  feedback:{idempotency:{anonymousScope:()=> 'server-verified-runtime-visitor'},fields:{score:{type:'number',validator:{input:z.string().transform(Number)}},label:{type:'string',validator:{input:v.pipe(v.string(),v.trim())}},priority:{type:'number',input:false,defaultValue:0},text:{type:'string'},labels:{type:'string[]'},payload:{type:'json'},happenedAt:{type:'date'}},states:{received:{default:true},reviewed:{}},access: {
+create: ()=>true,
+update: ()=>true,
+transition: ()=>true,
+list: ()=>({where:[]})
 },list:{filters:['state'],orderBy:['createdAt'],search:['label'],count:true}}
 }})]})
 await (await getMigrations(auth.options)).runMigrations()

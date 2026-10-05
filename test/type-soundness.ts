@@ -57,20 +57,36 @@ const auth = betterAuth({
                         },
                         reviewed: {},
                     },
-                    operations: {
-                        create: {
-                            authorize(event) {
+                    access: {
+                        create(event) {
+                            assertType<Equal<typeof event.model, 'feedback'>>()
+                            assertType<Equal<typeof event.operation, 'create'>>()
+                            assertType<Equal<typeof event.changes.score, number | undefined>>()
+                            assertType<Equal<IsAny<typeof event.changes>, false>>()
+                            // @ts-expect-error Input validation has already produced a native number.
+                            const wrong: string = event.changes.score
+                            // @ts-expect-error Another model's field is absent.
+                            void event.changes.question
+                            // @ts-expect-error Authorization context has no lifecycle-only previous record.
+                            void event.previous
+                            void wrong
+                            return true
+                        },
+                        transition(event) {
+                            assertType<Equal<typeof event.targetState, 'received' | 'reviewed' | null>>()
+                            return !!event.session
+                        },
+                    },
+                    hooks: {
+                        list: {
+                            before(event) {
+                                assertType<Equal<IsAny<typeof event>, false>>()
                                 assertType<Equal<typeof event.model, 'feedback'>>()
-                                assertType<Equal<typeof event.operation, 'create'>>()
-                                assertType<Equal<typeof event.changes.score, number | undefined>>()
-                                assertType<Equal<IsAny<typeof event.changes>, false>>()
-                                // @ts-expect-error Input validation has already produced a native number.
-                                const wrong: string = event.changes.score
-                                // @ts-expect-error Another model's field is absent.
-                                void event.changes.question
-                                void wrong
-                                return true
+                                assertType<Equal<typeof event.operation, 'list'>>()
+                                assertType<Equal<typeof event.targetState, 'received' | 'reviewed' | null>>()
                             },
+                        },
+                        create: {
                             after: async (event): Promise<void> => {
                                 assertType<Equal<IsAny<typeof event>, false>>()
                                 assertType<Equal<IsAny<typeof event.record>, false>>()
@@ -95,18 +111,14 @@ const auth = betterAuth({
                                 }
                             },
                         },
-                        transition: {
-                            authorize(event) {
-                                assertType<Equal<typeof event.targetState, 'received' | 'reviewed' | null>>()
-                                return !!event.session
-                            },
-                        },
                     },
                 },
                 inquiry: {
                     fields: { question: { type: 'string' } },
                     states: { waiting: { default: true }, answered: {} },
-                    operations: { list: { authorize: () => ({ where: [] }) } },
+                    access: {
+                        list: () => ({ where: [] }),
+                    },
                     idempotency: {
                         anonymousScope: ({ model }) => {
                             assertType<Equal<typeof model, 'inquiry'>>()
@@ -124,6 +136,76 @@ const auth = betterAuth({
     ],
 })
 const client = createAuthClient({ plugins: [contactClient<typeof auth>()] })
+
+const definition = { fields: { text: { type: 'string' as const } }, states: { received: { default: true } } }
+contact({
+    models: {
+        feedback: {
+            ...definition,
+            access: {
+                // @ts-expect-error An authorization callback must return a boolean, never void.
+                create: () => {},
+            },
+        },
+    },
+})
+contact({
+    models: {
+        feedback: {
+            ...definition,
+            access: {
+                // @ts-expect-error List access requires false or a database scope.
+                list: () => true,
+            },
+        },
+    },
+})
+contact({
+    models: {
+        feedback: {
+            ...definition,
+            access: {
+                // @ts-expect-error Create authorization does not accept a query scope.
+                create: () => ({ where: [] }),
+            },
+        },
+    },
+})
+contact({
+    models: {
+        feedback: {
+            ...definition,
+            hooks: {
+                create: {
+                    // @ts-expect-error Authorization belongs in access, separate from lifecycle hooks.
+                    authorize: () => true,
+                },
+            },
+        },
+    },
+})
+contact({
+    models: {
+        feedback: {
+            ...definition,
+            hooks: {
+                create: {
+                    // @ts-expect-error Lifecycle hooks return void; boolean authorization belongs in access.
+                    before: () => true,
+                },
+            },
+        },
+    },
+})
+contact({
+    models: {
+        feedback: {
+            ...definition,
+            // @ts-expect-error The superseded combined operations structure is no longer accepted.
+            operations: { create: { authorize: () => true } },
+        },
+    },
+})
 type Plugin = (typeof auth.options.plugins)[0]
 type Models = { [K in keyof Plugin['options']['models']]: Plugin['options']['models'][K] }
 assertType<Equal<IsAny<typeof contact>, false>>()

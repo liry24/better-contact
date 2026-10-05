@@ -89,9 +89,8 @@ export type ContactModel = {
         string,
         { default?: boolean; hooks?: { beforeEnter?: Hook; afterEnter?: Hook; beforeLeave?: Hook; afterLeave?: Hook } }
     >
-    operations?: {
-        [O in Operation]?: { authorize?: O extends 'list' ? ListPolicy : Policy; before?: Hook; after?: Hook }
-    }
+    access?: { [O in Operation]?: O extends 'list' ? ListPolicy : Policy }
+    hooks?: { [O in Operation]?: { before?: Hook; after?: Hook } }
 }
 export type ContactModels = Record<string, ContactModel>
 export type ContactDefinition = { fields: ContactFields; states: Record<string, unknown>; idempotency?: unknown }
@@ -137,14 +136,13 @@ export type ModelHookContext<
 type ModelHook<K extends string, D extends ContactDefinition, O extends Operation = Operation> = (
     context: ModelHookContext<K, D, O>,
 ) => void | Promise<void>
-type ModelOperations<K extends string, D extends ContactDefinition> = {
-    [O in Operation]?: {
-        authorize?: (
-            context: ModelContext<K, D, O>,
-        ) => O extends 'list' ? false | Scope | Promise<false | Scope> : boolean | Promise<boolean>
-        before?: ModelHook<K, D, O>
-        after?: ModelHook<K, D, O>
-    }
+type ModelAccess<K extends string, D extends ContactDefinition> = {
+    [O in Operation]?: (
+        context: ModelContext<K, D, O>,
+    ) => O extends 'list' ? false | Scope | Promise<false | Scope> : boolean | Promise<boolean>
+}
+type ModelHooks<K extends string, D extends ContactDefinition> = {
+    [O in Operation]?: { before?: ModelHook<K, D, O>; after?: ModelHook<K, D, O> }
 }
 type Definition<F extends ContactFields, S> = { fields: F; states: { [T in keyof S & string]: { default?: boolean } } }
 export type InferredModels<
@@ -173,7 +171,8 @@ export type InferredContactOptions<
                     }
                 }
             }
-            operations?: ModelOperations<K & string, Definition<F[K & string], S[K]>>
+            access?: ModelAccess<K & string, Definition<F[K & string], S[K]>>
+            hooks?: ModelHooks<K & string, Definition<F[K & string], S[K]>>
             idempotency?:
                 | false
                 | {

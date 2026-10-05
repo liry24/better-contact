@@ -36,9 +36,11 @@ export const auth = betterAuth({
             },
             reviewed: {},
           },
-          operations: {
+          access: {
+            create: () => true,
+          },
+          hooks: {
             create: {
-              authorize: () => true,
               after: async ({ record }): Promise<void> => {
                 // Notify staff through your application's delivery service.
                 // Persisted success is preserved if this hook fails.
@@ -85,26 +87,24 @@ Metadata is bounded to 4 KiB, 512 paths and depth 32; output traversal is bounde
 
 ## Access
 
-Every operation denies by default, including reading your own submission. Configure `operations.create.authorize`, `operations.read.authorize`, `operations.update.authorize`, `operations.transition.authorize`, `operations.delete.authorize`, and `operations.list.authorize` separately. Policies receive `{ model, operation, session, record, changes, targetState, headers }`. Sessions are resolved by Better Auth from the caller's headers. Policies and hooks receive copies; mutating them does not modify the write.
+Every operation denies by default, including reading your own submission. Configure `access.create`, `access.read`, `access.update`, `access.transition`, `access.delete`, and `access.list` separately. Create/read/update/transition/delete callbacks return `true` to allow or `false` to deny; a missing callback or an accidental `undefined` return denies access. The plugin converts denial into its normal API error before lifecycle hooks run. Policies receive `{ model, operation, session, record, changes, targetState, headers }`. Sessions are resolved by Better Auth from the caller's headers. Policies and hooks receive copies; mutating them does not modify the write.
 
 For a report, require `session` in `create` and verify the submitted target against your application's data and access rules. There is no admin plugin dependency. An application may grant staff `read` and `list` while denying `transition`. `update` accepts only configured input fields and cannot set state, identity, timestamps or revision. Bulk operations cannot bypass these rules.
 
-`operations.list.authorize` returns `false` or `{ where: [...] }`. Returning `{ where: [] }` deliberately grants access to every row in that model. A scoped example:
+`access.list` returns `false` or `{ where: [...] }`; an accidental `undefined` return denies access. Returning `{ where: [] }` deliberately grants access to every row in that model. A scoped example:
 
 ```ts
-operations: {
-  list: {
-    authorize: ({ session }) => {
-      if (!session) return false
-      return {
-        where: [
-          {
-            field: 'userId',
-            value: session.user.id,
-          },
-        ],
-      }
-    },
+access: {
+  list: ({ session }) => {
+    if (!session) return false
+    return {
+      where: [
+        {
+          field: 'userId',
+          value: session.user.id,
+        },
+      ],
+    }
   },
 }
 ```
@@ -181,7 +181,7 @@ Missing or invalid anonymous scope rejects creation before writing. The plugin n
 
 Two private native columns, `submissionToken` (unique) and `submissionFingerprint`, are saved in the same INSERT as the contact fields. There is no receipt table, snapshot, transaction requirement or D1-specific wrapper. Protected rows retain these values for their lifetime; there is no TTL or automatic cleanup. Physical deletion, including a configured cascade, ends protection: the same key can then create a new row. Columns are nullable for pre-existing records, which gain no retrospective retry protection.
 
-The first accepted write returns its normal creation result plus `accepted: true, replayed: false`. A retry returns only `{ model, id, accepted: true, replayed: true }`. Narrow on `replayed` before accessing creation data. Receipts grant no read/list access and expose neither original content nor later staff edits. Replays recheck `operations.create.authorize`, the guard and any replay policy. The create policy receives normalized submitted values on replay; omitted defaults are not regenerated or reconstructed from mutable rows. Keep creation policies compatible with that distinction, or deny replay explicitly.
+The first accepted write returns its normal creation result plus `accepted: true, replayed: false`. A retry returns only `{ model, id, accepted: true, replayed: true }`. Narrow on `replayed` before accessing creation data. Receipts grant no read/list access and expose neither original content nor later staff edits. Replays recheck `access.create`, the guard and any replay policy. The create policy receives normalized submitted values on replay; omitted defaults are not regenerated or reconstructed from mutable rows. Keep creation policies compatible with that distinction, or deny replay explicitly.
 
 The content fingerprint uses deterministic normalization of explicitly supplied values, with sorted object keys and distinct representations for dates and arrays. Native defaults, omitted-value validator defaults and adapter encodings are excluded. Submitted input validators run again; they must be deterministic. Same key with different normalized content returns `CONTACT_IDEMPOTENCY_CONFLICT`. Fingerprints have an explicit format version; unknown versions or changed normalization fail closed instead of permitting a second insert. New keys may intentionally submit identical content.
 
@@ -228,7 +228,7 @@ Every table entry also has a model-bound equivalent: `client.contact.feedback.<o
 
 Exactly one configured state has `default: true`. State keys are inferred as literals and have no built-in open/closed/terminal meaning. Unknown states are rejected. A same-state transition checks permission and revision but does not write or call hooks.
 
-Each `operations.create`, `read`, `list`, `update`, `transition` and `delete` may define `authorize`, `before` and `after`. Each state's `hooks` may define `beforeEnter`/`afterEnter` and `beforeLeave`/`afterLeave`.
+Each `hooks.create`, `hooks.read`, `hooks.list`, `hooks.update`, `hooks.transition` and `hooks.delete` may define `before` and `after`. These lifecycle callbacks do not grant access; configure authorization separately in `access`. Each state's `hooks` may define `beforeEnter`/`afterEnter` and `beforeLeave`/`afterLeave`.
 
 Creation runs model `create.before`, initial-state `beforeEnter`, persistence, model `create.after`, then initial-state `afterEnter`. A transition runs model `transition.before`, old-state `beforeLeave`, new-state `beforeEnter`, persistence, old-state `afterLeave`, new-state `afterEnter`, then model `transition.after`. Inline callbacks infer the model key, state keys and native fields; no context type import is needed. If a hook refers back to `auth`, give it an explicit `Promise<void>` return type to break the inference cycle. `changes` contains partial, validated native values before adapter input transforms (including generated managed values); replays omit defaults. `record` and `previous` contain adapter output, including hidden fields, before response validators/filtering. Hooks receive policy context plus `previous`; after hooks see the saved `record` (null after deletion). Before hooks can reject by throwing. They can run for a write that subsequently loses a race, so keep external side effects in after hooks.
 

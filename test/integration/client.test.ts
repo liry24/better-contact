@@ -15,15 +15,21 @@ it('shares authorization, validation, scoping and hooks across native model and 
                 fields: { message: { type: 'string' }, priority: { type: 'number', input: false, defaultValue: 0 } },
                 states: { received: { default: true }, reviewed: {} },
                 list: { count: true },
-                operations: {
+                access: {
+                    create: () => true,
+                    read: ({ session }) => !!session,
+                    list: ({ session }) => (session ? { where: [{ field: 'state', value: 'received' }] } : false),
+                    update: ({ session }) => !!session,
+                    transition: () => false,
+                    delete: ({ session }) => !!session,
+                },
+                hooks: {
                     create: {
-                        authorize: () => true,
                         after: () => {
                             events.push('create')
                         },
                     },
                     read: {
-                        authorize: ({ session }) => !!session,
                         before: () => {
                             events.push('read.before')
                         },
@@ -32,23 +38,18 @@ it('shares authorization, validation, scoping and hooks across native model and 
                         },
                     },
                     list: {
-                        authorize: ({ session }) =>
-                            session ? { where: [{ field: 'state', value: 'received' }] } : false,
                         after: () => {
                             throw new Error('observer')
                         },
                     },
-                    update: { authorize: ({ session }) => !!session },
-                    transition: { authorize: () => false },
-                    delete: { authorize: ({ session }) => !!session },
                 },
             },
             abuse_report: {
                 idempotency: false,
                 fields: { target: { type: 'string' } },
                 states: { submitted: { default: true }, verified: {} },
-                operations: {
-                    create: { authorize: ({ session, changes }) => !!session && changes.target === 'verified-target' },
+                access: {
+                    create: ({ session, changes }) => !!session && changes.target === 'verified-target',
                 },
             },
         },
@@ -176,10 +177,10 @@ it('keeps saved identities and receipts when actual output Dates exceed metadata
                 },
                 states: { received: { default: true } },
                 idempotency: { anonymousScope: () => 'verified-visitor' },
-                operations: {
-                    create: { authorize: () => true },
-                    read: { authorize: () => true },
-                    update: { authorize: () => true },
+                access: {
+                    create: () => true,
+                    read: () => true,
+                    update: () => true,
                 },
             },
         },
