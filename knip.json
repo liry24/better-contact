@@ -1,0 +1,15 @@
+{
+    "ignoreExportsUsedInFile": true,
+    "workspaces": {
+        ".": {
+            "entry": ["test/**/*.test.ts", "test/types.ts"],
+            "project": ["*.ts", "test/**/*.ts"],
+            "ignoreDependencies": ["auth"]
+        },
+        "packages/better-contact": {
+            "entry": ["src/{index,client}.ts!"],
+            "project": ["src/**/*.ts!", "*.config.ts"],
+            "ignoreDependencies": ["@arethetypeswrong/cli", "publint"]
+        }
+    }
+}

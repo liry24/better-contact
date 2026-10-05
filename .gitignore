@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.tgz
+.contract-*/
+coverage/
+test/generated/
+packages/better-contact/README.md
+packages/better-contact/LICENSE
