@@ -18,7 +18,8 @@
         "test:consumer": "vp test run test/consumer",
         "test:runtime": "node test/runtime/packed.mjs",
         "workspace:check": "sherif",
-        "unused": "knip && knip --production"
+        "unused": "knip && knip --production",
+        "bundle:size": "bun run build && bun scripts/measure-bundles.mjs --package-root packages/better-contact"
     },
     "devDependencies": {
         "@better-auth/core": "1.7.7",
