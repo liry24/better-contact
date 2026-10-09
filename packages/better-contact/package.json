@@ -43,7 +43,7 @@
     "devDependencies": {
         "@arethetypeswrong/cli": "^0.18.5",
         "publint": "^0.3.24",
-        "vite-plus": "catalog:"
+        "vite-plus": "1.0.0"
     },
     "peerDependencies": {
         "@better-auth/core": "^1.7.0",
