@@ -27,6 +27,39 @@ const base = {
         create: () => true,
     },
 }
+it('applies the create limit before submission lookup while preserving replays within the limit', async () => {
+    const after = vi.fn<() => void>()
+    const app = await setup({
+        limits: { createsPerMinute: 2 },
+        models: {
+            report: {
+                ...base,
+                idempotency: { anonymousScope: () => 'verified-test-visitor' },
+                hooks: { create: { after } },
+            },
+        },
+    })
+    try {
+        const body = { model: 'report' as const, data: { text: 'saved' }, idempotencyKey: key() }
+        const saved = await app.auth.api.createContact({ body })
+        expect(await app.auth.api.createContact({ body })).toEqual({
+            model: 'report',
+            id: saved.id,
+            accepted: true,
+            replayed: true,
+        })
+        const lookup = vi.spyOn((await app.auth.$context).adapter, 'findOne')
+        await expect(app.auth.api.createContact({ body })).rejects.toMatchObject({
+            body: { code: 'CONTACT_RATE_LIMIT' },
+        })
+        expect(lookup).not.toHaveBeenCalled()
+        expect(after).toHaveBeenCalledTimes(1)
+        expect(app.database.prepare('SELECT count(*) AS total FROM contact_report').get()?.total).toBe(1)
+    } finally {
+        app.close()
+    }
+})
+
 it('protects by default without reserving rejected submissions or repeating hooks after output failures', async () => {
     let reject = true
     const afterEnter = vi.fn<() => void>()

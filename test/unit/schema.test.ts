@@ -3,6 +3,16 @@ import { expect, it } from 'vite-plus/test'
 import { contact } from '../../packages/better-contact/src/index'
 
 const valid = { states: { received: { default: true } }, fields: { message: { type: 'string' as const } } }
+it.each(Object.getOwnPropertyNames(Object.prototype))('rejects prototype member %s as a field or column', (name) => {
+    for (const key of [name, name.toUpperCase()]) {
+        for (const fields of [
+            { [key]: { type: 'string' as const, required: false } },
+            { optional: { type: 'string' as const, required: false, fieldName: key } },
+        ])
+            expect(() => contact({ models: { feedback: { ...valid, fields } } })).toThrow(/contact field/u)
+    }
+})
+
 it('rejects unsafe names, ambiguous defaults, reserved fields and unsupported mappings', () => {
     for (const models of [
         {},

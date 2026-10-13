@@ -79,6 +79,13 @@ function typed<T>(schema: z.ZodType) {
     return z.custom<T>((value) => schema.safeParse(value).success)
 }
 
+async function resolveActor(ctx: Parameters<typeof getAuthoritativeSessionFromCtx>[0]) {
+    return {
+        session: await getAuthoritativeSessionFromCtx(ctx),
+        headers: new Headers(ctx.headers),
+    }
+}
+
 type Bound<T, B extends boolean> = T extends unknown ? (B extends true ? Omit<T, 'model'> : T) : never
 function endpointSet<M extends ContactModels, P extends string, B extends boolean>(
     service: ReturnType<typeof createService>,
@@ -104,10 +111,7 @@ function endpointSet<M extends ContactModels, P extends string, B extends boolea
                 ),
             },
             async (ctx) => {
-                const actor = {
-                    session: await getAuthoritativeSessionFromCtx(ctx),
-                    headers: new Headers(ctx.headers),
-                }
+                const actor = await resolveActor(ctx)
                 return contactResponse(
                     ctx,
                     (await service.create(
@@ -126,10 +130,7 @@ function endpointSet<M extends ContactModels, P extends string, B extends boolea
                 body: typed<Bound<TargetBody<M>, B>>(shape(target)),
             },
             async (ctx) => {
-                const actor = {
-                    session: await getAuthoritativeSessionFromCtx(ctx),
-                    headers: new Headers(ctx.headers),
-                }
+                const actor = await resolveActor(ctx)
                 return contactResponse(
                     ctx,
                     (await service.read(ctx.context.adapter, actor, body(ctx.body) as TargetBody<M>)) as ReadResult<M>,
@@ -175,10 +176,7 @@ function endpointSet<M extends ContactModels, P extends string, B extends boolea
                 ),
             },
             async (ctx) => {
-                const actor = {
-                    session: await getAuthoritativeSessionFromCtx(ctx),
-                    headers: new Headers(ctx.headers),
-                }
+                const actor = await resolveActor(ctx)
                 return contactResponse(
                     ctx,
                     (await service.list(ctx.context.adapter, actor, body(ctx.body) as ListBody<M>)) as ListResult<M>,
@@ -193,10 +191,7 @@ function endpointSet<M extends ContactModels, P extends string, B extends boolea
                 body: typed<Bound<UpdateBody<M>, B>>(shape(update)),
             },
             async (ctx) => {
-                const actor = {
-                    session: await getAuthoritativeSessionFromCtx(ctx),
-                    headers: new Headers(ctx.headers),
-                }
+                const actor = await resolveActor(ctx)
                 return contactResponse(
                     ctx,
                     (await service.mutate(
@@ -216,10 +211,7 @@ function endpointSet<M extends ContactModels, P extends string, B extends boolea
                 body: typed<Bound<TransitionBody<M>, B>>(shape(transition)),
             },
             async (ctx) => {
-                const actor = {
-                    session: await getAuthoritativeSessionFromCtx(ctx),
-                    headers: new Headers(ctx.headers),
-                }
+                const actor = await resolveActor(ctx)
                 return contactResponse(
                     ctx,
                     (await service.mutate(
@@ -239,10 +231,7 @@ function endpointSet<M extends ContactModels, P extends string, B extends boolea
                 body: typed<Bound<TargetBody<M> & { revision: number }, B>>(shape(deletion)),
             },
             async (ctx) => {
-                const actor = {
-                    session: await getAuthoritativeSessionFromCtx(ctx),
-                    headers: new Headers(ctx.headers),
-                }
+                const actor = await resolveActor(ctx)
                 return contactResponse(
                     ctx,
                     (await service.mutate(
@@ -275,10 +264,7 @@ function endpointSet<M extends ContactModels, P extends string, B extends boolea
                 ),
             },
             async (ctx) => {
-                const actor = {
-                    session: await getAuthoritativeSessionFromCtx(ctx),
-                    headers: new Headers(ctx.headers),
-                }
+                const actor = await resolveActor(ctx)
                 const results: BulkResult<M>['results'] = []
                 // Each item is independently authorized and conditionally persisted. This is intentionally not atomic.
                 for (const item of ctx.body.items) {
