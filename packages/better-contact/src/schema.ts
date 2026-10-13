@@ -25,7 +25,9 @@ export const submissionFields = {
     submissionFingerprint: { type: 'string', required: false, input: false, returned: false },
 } satisfies ContactFields
 const reserved = new Set(
-    ['id', ...Object.keys(baseFields), '__proto__', 'constructor', 'prototype'].map((key) => key.toLowerCase()),
+    ['id', ...Object.keys(baseFields), ...Object.getOwnPropertyNames(Object.prototype), 'prototype'].map((key) =>
+        key.toLowerCase(),
+    ),
 )
 export const tableName = (model: string) => `contact_${model}`
 const normalized = (name: string) => name.replace(/([a-z0-9])([A-Z])/gu, '$1_$2').toLowerCase()

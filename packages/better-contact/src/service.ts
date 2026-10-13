@@ -178,7 +178,6 @@ export function createService<M extends ContactModels>(options: ContactOptions<M
         if (!keyed && body.idempotencyKey !== undefined)
             fail('IDEMPOTENCY_DISABLED', 'This model disables submission keys')
         const token = keyed ? await submissionToken(definition, actor, body.model, body.idempotencyKey) : null
-        const existing = token ? await lookupSubmission(adapter, body.model, token) : null
         const now = Date.now()
         const window = windows.get(body.model)
         if (!window || now - window.start >= 60_000) windows.set(body.model, { start: now, count: 1 })
@@ -187,6 +186,7 @@ export function createService<M extends ContactModels>(options: ContactOptions<M
                 fail('RATE_LIMIT', 'Contact submission limit reached', 'TOO_MANY_REQUESTS')
             window.count++
         }
+        const existing = token ? await lookupSubmission(adapter, body.model, token) : null
         const defaults = { keys: [] as string[], replay: !!existing }
         const data = await prepare(definition.fields, body.data, 'create', false, maxBytes, defaults)
         // Only normalized, explicitly submitted values identify content. Generated defaults and
@@ -303,13 +303,11 @@ export function createService<M extends ContactModels>(options: ContactOptions<M
         const definition = model(body.model)
         if (operation === 'transition' && (!body.state || !Object.hasOwn(definition.states, body.state)))
             fail('STATE', 'Unknown contact state')
+        let changes =
+            operation === 'update' ? await prepare(definition.fields, body.data, 'update', managed, maxBytes) : {}
         const record = await find(adapter, body)
-        const changes =
-            operation === 'update'
-                ? await prepare(definition.fields, body.data, 'update', managed, maxBytes)
-                : operation === 'transition' && record.state !== body.state
-                  ? await prepare(definition.fields, {}, 'update', true, maxBytes)
-                  : {}
+        if (operation === 'transition' && record.state !== body.state)
+            changes = await prepare(definition.fields, {}, 'update', true, maxBytes)
         const event = context(actor, body.model, operation, record, changes, body.state ?? null)
         await authorize(definition, event, managed)
         const where = revision(body, record)
